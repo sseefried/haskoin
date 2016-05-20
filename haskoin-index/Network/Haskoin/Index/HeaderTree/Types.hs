@@ -1,4 +1,4 @@
-module Network.Haskoin.Node.HeaderTree.Types where
+module Network.Haskoin.Index.HeaderTree.Types where
 
 import           Data.Word             (Word32, Word64)
 import           Database.Persist      (PersistField (..), PersistValue (..),
@@ -25,3 +25,4 @@ instance PersistField NodeHeader where
 
 instance PersistFieldSql NodeHeader where
     sqlType _ = SqlBlob
+

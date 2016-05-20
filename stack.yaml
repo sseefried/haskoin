@@ -1,7 +1,7 @@
 flags: {}
 packages:
 - haskoin-core
-- haskoin-node
+- haskoin-index
 - haskoin-wallet
 extra-deps:
 - concurrent-extra-0.7.0.10
@@ -9,4 +9,4 @@ extra-deps:
 - murmur3-1.0.1
 - pbkdf-1.1.1.1
 - secp256k1-0.4.4
-resolver: lts-5.2
+resolver: lts-5.17

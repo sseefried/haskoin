@@ -153,3 +153,4 @@ base58ToAddr :: ByteString -> Maybe Address
 base58ToAddr str = do
     val <- decodeBase58Check str
     decodeToMaybe val
+

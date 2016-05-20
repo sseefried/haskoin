@@ -4,8 +4,8 @@ module Network.Haskoin.Script.Parser
 , SimpleInput(..)
 , RedeemScript
 , scriptAddr
-, scriptRecipient
-, scriptSender
+, outputAddress
+, inputAddress
 , encodeInput
 , encodeInputBS
 , decodeInput
@@ -204,25 +204,19 @@ scriptOpToInt s
   where
     res = (fromIntegral $ BS.head $ encode' s) - 0x50
 
--- | Computes the recipient address of a script. This function fails if the
--- script could not be decoded as a pay to public key hash or pay to script
--- hash.
-scriptRecipient :: Script -> Either String Address
-scriptRecipient s = case decodeOutput s of
-    Right (PayPKHash a)     -> return a
-    Right (PayScriptHash a) -> return a
-    Right _                 -> Left "scriptRecipient: bad output script type"
-    _                       -> Left "scriptRecipient: non-standard script type"
+-- | Get the address of a `ScriptOutput`
+outputAddress :: ScriptOutput -> Either String Address
+outputAddress s = case s of
+    PayPKHash a -> return a
+    PayScriptHash a -> return a
+    _ -> Left "outputAddress: bad output script type"
 
--- | Computes the sender address of a script. This function fails if the
--- script could not be decoded as a spend public key hash or script hash
--- input.
-scriptSender :: Script -> Either String Address
-scriptSender s = case decodeInput s of
-    Right (RegularInput (SpendPKHash _ key)) -> return $ pubKeyAddr key
-    Right (ScriptHashInput _ rdm)            -> return $ scriptAddr rdm
-    Right _ -> Left "scriptSender: bad input script type"
-    _ -> Left "scriptSender: non-standard script type"
+-- | Get the address of a `ScriptInput`
+inputAddress :: ScriptInput -> Either String Address
+inputAddress s = case s of
+    RegularInput (SpendPKHash _ key) -> return $ pubKeyAddr key
+    ScriptHashInput _ rdm -> return $ scriptAddr rdm
+    _ -> Left "inputAddress: bad input script type"
 
 -- | Data type describing standard transaction input scripts. Input scripts
 -- provide the signing data required to unlock the coins of the output they are

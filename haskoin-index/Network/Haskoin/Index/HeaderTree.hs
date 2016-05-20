@@ -1,7 +1,4 @@
-{-# LANGUAGE KindSignatures        #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE RankNTypes            #-}
-module Network.Haskoin.Node.HeaderTree
+module Network.Haskoin.Index.HeaderTree
 ( BlockChainAction(..)
 , BlockHeight
 , NodeBlock
@@ -38,40 +35,43 @@ module Network.Haskoin.Node.HeaderTree
 , connectHeaders
 , blockLocator
 , pruneChain
+, runSql
 ) where
 
-import           Control.Monad                         (foldM, forM, unless,
-                                                        when, (<=<))
-import           Control.Monad.State                   (evalStateT, get, put)
-import           Control.Monad.Trans                   (MonadIO, lift)
-import           Control.Monad.Trans.Either            (EitherT, left,
-                                                        runEitherT)
-import           Data.Bits                             (shiftL)
-import qualified Data.ByteString                       as BS (reverse, take)
-import           Data.Function                         (on)
-import           Data.List                             (find, maximumBy, sort)
-import           Data.Maybe                            (fromMaybe, isNothing,
-                                                        listToMaybe, mapMaybe)
-import           Data.String.Conversions               (cs)
-import           Data.Word                             (Word32)
-import           Database.Esqueleto                    (Esqueleto, Value, asc,
-                                                        delete, from, groupBy,
-                                                        in_, insertMany_, limit,
-                                                        max_, not_, orderBy,
-                                                        select, set, unValue,
-                                                        update, val, valList,
-                                                        where_, (!=.), (&&.),
-                                                        (<=.), (=.), (==.),
-                                                        (>.), (>=.), (^.),
-                                                        (||.))
-import           Database.Persist                      (Entity (..), insert_)
-import           Database.Persist.Sql                  (SqlPersistT)
+import           Control.Monad                          (foldM, forM, unless,
+                                                         when, (<=<))
+import           Control.Monad.State                    (evalStateT, get, put)
+import           Control.Monad.Trans                    (MonadIO, lift)
+import           Control.Monad.Trans.Control            (MonadBaseControl)
+import           Control.Monad.Trans.Either             (EitherT, left,
+                                                         runEitherT)
+import           Data.Bits                              (shiftL)
+import qualified Data.ByteString                        as BS (reverse, take)
+import           Data.Function                          (on)
+import           Data.List                              (find, maximumBy, sort)
+import           Data.Maybe                             (fromMaybe, isNothing,
+                                                         listToMaybe, mapMaybe)
+import           Data.String.Conversions                (cs)
+import           Data.Word                              (Word32)
+import           Database.Esqueleto                     (Esqueleto, Value, asc,
+                                                         from, groupBy, in_,
+                                                         insertMany_, limit,
+                                                         max_, orderBy, select,
+                                                         unValue, val, valList,
+                                                         where_, (&&.), (<=.),
+                                                         (==.), (>.), (>=.),
+                                                         (^.), (||.))
+import           Database.Persist                       (Entity (..), insert_)
+import           Database.Persist.Sql                   (ConnectionPool,
+                                                         SqlBackend,
+                                                         SqlPersistT,
+                                                         runSqlConn, runSqlPool)
 import           Network.Haskoin.Block
 import           Network.Haskoin.Constants
 import           Network.Haskoin.Crypto
-import           Network.Haskoin.Node.Checkpoints
-import           Network.Haskoin.Node.HeaderTree.Model
-import           Network.Haskoin.Node.HeaderTree.Types
+import           Network.Haskoin.Index.Checkpoints
+import           Network.Haskoin.Index.HeaderTree.Model
+import           Network.Haskoin.Index.HeaderTree.Types
 import           Network.Haskoin.Util
 
 data BlockChainAction
@@ -641,3 +641,11 @@ pruneChain best = if (nodeBlockChain best == 0) then return best else do
         where_ $ t ^. NodeBlockHeight <=. val (nodeBlockHeight best)
               &&. t ^. NodeBlockChain  !=. val 0
     return best{ nodeBlockChain = 0 }
+
+runSql :: (MonadBaseControl IO m)
+       => SqlPersistT m a
+       -> Either SqlBackend ConnectionPool
+       -> m a
+runSql f (Left  conn) = runSqlConn f conn
+runSql f (Right pool) = runSqlPool f pool
+

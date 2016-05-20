@@ -194,3 +194,4 @@ instance FromJSON Config where
 mergeValues :: Value -> Value -> Value
 mergeValues (Object d) (Object c) = Object (unionWith mergeValues d c)
 mergeValues _ c = c
+

@@ -43,28 +43,24 @@ data Block =
     Block {
             -- | Header information for this block.
             blockHeader     :: !BlockHeader
-            -- | Coinbase transaction of this block.
-          , blockCoinbaseTx :: !CoinbaseTx
             -- | List of transactions pertaining to this block.
           , blockTxns       :: ![Tx]
           } deriving (Eq, Show, Read)
 
 instance NFData Block where
-    rnf (Block h c ts) = rnf h `seq` rnf c `seq` rnf ts
+    rnf (Block h ts) = rnf h `seq` rnf ts
 
 instance Binary Block where
 
     get = do
         header     <- get
         (VarInt c) <- get
-        cb         <- get
-        txs        <- replicateM (fromIntegral (c-1)) get
-        return $ Block header cb txs
+        txs        <- replicateM (fromIntegral c) get
+        return $ Block header txs
 
-    put (Block h cb txs) = do
+    put (Block h txs) = do
         put h
-        put $ VarInt $ fromIntegral $ length txs + 1
-        put cb
+        put $ VarInt $ fromIntegral $ length txs
         forM_ txs put
 
 newtype BlockHash = BlockHash { getBlockHash :: Hash256 }

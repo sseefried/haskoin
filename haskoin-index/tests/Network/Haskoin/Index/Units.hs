@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module Network.Haskoin.Node.Units where
+module Network.Haskoin.Index.Units where
 import           Control.Monad                   (forM_, when)
 import           Control.Monad.Logger            (NoLoggingT)
 import           Control.Monad.Trans             (MonadIO, liftIO)
@@ -11,7 +11,7 @@ import           Database.Persist.Sqlite         (SqlPersistT,
                                                   runMigrationSilent, runSqlite)
 import           Network.Haskoin.Block
 import           Network.Haskoin.Constants
-import           Network.Haskoin.Node.HeaderTree
+import           Network.Haskoin.Index.HeaderTree
 import           Test.Framework                  (Test, testGroup)
 import           Test.Framework.Providers.HUnit  (testCase)
 import           Test.HUnit                      (Assertion, assertBool,
@@ -252,3 +252,4 @@ mockBlock parent chain n = nodeBlock parent chain bh
         , bhNonce        = n
         }
     z = "0000000000000000000000000000000000000000000000000000000000000000"
+
