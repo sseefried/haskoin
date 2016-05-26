@@ -141,18 +141,18 @@ appDir = case os of "mingw"   -> windows
             Nothing -> lookupEnv "APPDATA"
             Just l -> return $ Just l
         case dirM of
-            Just d -> return $ d </> "Haskoin Wallet"
+            Just d -> return $ d </> "Haskoin Index"
             Nothing -> return "."
     osx = do
         homeM <- lookupEnv "HOME"
         case homeM of
             Just home -> return $ home </> "Library"
                                        </> "Application Support"
-                                       </> "Haskoin Wallet"
+                                       </> "Haskoin Index"
             Nothing -> return "."
     unix = do
         homeM <- lookupEnv "HOME"
         case homeM of
-            Just home -> return $ home </> ".hw"
+            Just home -> return $ home </> ".haskoin-index"
             Nothing -> return "."
 
