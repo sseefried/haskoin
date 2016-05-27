@@ -40,6 +40,8 @@ data Config = Config
     -- ^ Bind address for ZeroMQ notifications
     , configDatabase      :: !(HashMap Text DatabaseConfType)
     -- ^ Database configuration
+    , configLevelDBParams :: !(HashMap Text Int)
+    -- ^ Address index parameters
     , configBTCNodes      :: !(HashMap Text [BTCNode])
     -- ^ Trusted Bitcoin full nodes to connect to
     , configLogFile       :: !FilePath
@@ -117,6 +119,7 @@ instance FromJSON Config where
         configBind                  <- o .: "bind-socket"
         configBindNotif             <- o .: "bind-socket-notif"
         configDatabase              <- o .: "database"
+        configLevelDBParams         <- o .: "leveldb-params"
         configBTCNodes              <- o .: "bitcoin-full-nodes"
         configLogFile               <- o .: "log-file"
         LogLevelJSON configLogLevel <- o .: "log-level"

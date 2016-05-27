@@ -69,13 +69,13 @@ blockDownload batchSize = do
             $(logDebug) $ formatPid pid peerSessionHost
                 "Found a peer to download blocks"
             -- index the blocks
-            logBlockChainAction action
             startTime <- liftIO getCurrentTime
             (resM, cnt) <-
                 peerBlockSource pid peerSessionHost (map nodeHash ns) $$
                 indexBlocks
             endTime <- liftIO getCurrentTime
             let diff = diffUTCTime endTime startTime
+            logBlockChainAction action
             -- Update the best block
             case (action, resM) of
                 (BestChain _, Just b) -> do

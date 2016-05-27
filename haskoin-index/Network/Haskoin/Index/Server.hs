@@ -26,7 +26,7 @@ import           Data.ByteString                       (ByteString)
 import qualified Data.ByteString.Lazy                  as BL (fromStrict,
                                                               toStrict)
 import           Data.Conduit                          (awaitForever, ($$))
-import qualified Data.HashMap.Strict                   as H (lookup)
+import qualified Data.HashMap.Strict                   as H (lookup, (!))
 import           Data.List.NonEmpty                    (NonEmpty ((:|)))
 import           Data.Maybe                            (fromJust, fromMaybe,
                                                         isJust)
@@ -64,13 +64,22 @@ runIndex cfg = maybeDetach cfg $ run $ do
     pool <- initDatabase cfg
     $(logDebug) "Initializing the HeaderTree"
     best <- runSql (initHeaderTree >> getBestBlock) (Right pool)
-    $(logDebug) "Initializing the NodeState"
-    let opts = L.defaultOptions { L.createIfMissing = True
-                                , L.blockSize       = 256*1024
-                                , L.cacheSize       = 256*1024*1024
-                                , L.writeBufferSize = 1024*1024*1024
+    let blockSize       = configLevelDBParams cfg H.! "block-size"
+        cacheSize       = configLevelDBParams cfg H.! "cache-size"
+        writeBufferSize = configLevelDBParams cfg H.! "writebuffer-size"
+        opts = L.defaultOptions { L.createIfMissing = True
+                                , L.blockSize       = blockSize
+                                , L.cacheSize       = cacheSize
+                                , L.writeBufferSize = writeBufferSize
                                 }
+    $(logInfo) $ pack $ unlines $
+        [ "Opening LevelDB address index with parameters:"
+        , "  blockSize       : " ++ formatBytes blockSize
+        , "  cacheSize       : " ++ formatBytes cacheSize
+        , "  writeBufferSize : " ++ formatBytes writeBufferSize
+        ]
     db <- L.open "haskoin-index" opts
+    $(logDebug) "Initializing the NodeState"
     state <- liftIO $ getNodeState cfg (Right pool) db best
     $(logDebug) "Initializing the LevelDB Index"
     runNodeT (withLevelDB initLevelDB) state
@@ -102,6 +111,19 @@ runIndex cfg = maybeDetach cfg $ run $ do
         (pack networkName `H.lookup` configBTCNodes cfg)
     hosts = map (\x -> PeerHost (btcNodeHost x) (btcNodePort x)) nodes
     processTx = awaitForever $ \tx -> return () -- TODO
+
+formatBytes :: Int -> String
+formatBytes b
+    | b < k = show b ++ " Bytes"
+    | b < m = show (fromIntegral b/fromIntegral k :: Double) ++ " KBytes"
+    | b < g = show (fromIntegral b/fromIntegral m :: Double) ++ " MBytes"
+    | b < t = show (fromIntegral b/fromIntegral g :: Double) ++ " GBytes"
+    | otherwise = show (fromIntegral b/fromIntegral t :: Double) ++ " TBytes"
+  where
+    k = 1024
+    m = k*1024
+    g = m*1024
+    t = g*1024
 
 maybeDetach :: Config -> IO () -> IO ()
 maybeDetach cfg action =

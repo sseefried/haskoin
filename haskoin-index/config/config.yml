@@ -37,6 +37,12 @@ bitcoin-full-nodes:
         - host: seed.bitcoin.jonasschnelli.ch
           port: 8333
 
+# LevelDB address index parameters in bytes
+leveldb-params:
+    block-size: 262144 # 256*1024
+    cache-size: 268435456 # 256*1024*1024
+    writebuffer-size: 1073741824 # 1024*1024*1024
+
 # Log file name. Either absolute path or relative to work-dir/network
 log-file: haskoin-indexer.log
 
