@@ -30,11 +30,12 @@ import           System.Posix.Daemon                   (killAndWait)
 import           System.ZMQ4                           (KeyFormat (..),
                                                         Req (..), Socket,
                                                         SocketType, connect,
-                                                        receive, send,
+                                                        receive, restrict, send,
                                                         setCurvePublicKey,
                                                         setCurveSecretKey,
                                                         setCurveServerKey,
-                                                        withContext, withSocket)
+                                                        setLinger, withContext,
+                                                        withSocket)
 
 type Handler = R.ReaderT Config IO
 
@@ -84,6 +85,7 @@ sendZmq req = do
     cfg <- R.ask
     a <- async $ liftIO $ withContext $ \ctx ->
         withSocket ctx Req $ \sock -> do
+            setLinger (restrict (0 :: Int)) sock
             setupAuth cfg sock
             connect sock (configBind cfg)
             send sock [] (cs $ encode req)

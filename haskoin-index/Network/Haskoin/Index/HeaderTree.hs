@@ -55,11 +55,13 @@ import           Data.Maybe                             (fromMaybe, isNothing,
 import           Data.String.Conversions                (cs)
 import           Data.Word                              (Word32)
 import           Database.Esqueleto                     (Esqueleto, Value, asc,
-                                                         from, groupBy, in_,
-                                                         insertMany_, limit,
-                                                         max_, orderBy, select,
-                                                         unValue, val, valList,
-                                                         where_, (&&.), (<=.),
+                                                         delete, from, groupBy,
+                                                         in_, insertMany_,
+                                                         limit, max_, not_,
+                                                         orderBy, select, set,
+                                                         unValue, update, val,
+                                                         valList, where_, (!=.),
+                                                         (&&.), (<=.), (=.),
                                                          (==.), (>.), (>=.),
                                                          (^.), (||.))
 import           Database.Persist                       (Entity (..), insert_)
@@ -639,15 +641,14 @@ evalNewChain best newNodes
 -- | Remove all other chains from database and return updated best block node.
 pruneChain :: MonadIO m
            => NodeBlock
-           -> SqlPersistT m NodeBlock
-pruneChain best = if (nodeBlockChain best == 0) then return best else do
+           -> SqlPersistT m ()
+pruneChain best = unless (nodeBlockChain best == 0) $ do
     forks <- reverse <$> getPivots best
     delete $ from $ \t -> where_ $ not_ (chainPathQuery t forks)
     update $ \t -> do
         set t [ NodeBlockChain =. val 0 ]
         where_ $ t ^. NodeBlockHeight <=. val (nodeBlockHeight best)
               &&. t ^. NodeBlockChain  !=. val 0
-    return best{ nodeBlockChain = 0 }
 
 runSql :: (MonadBaseControl IO m)
        => SqlPersistT m a

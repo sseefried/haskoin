@@ -54,7 +54,7 @@ instance Show ShowPeerId where
 getNodeState :: Config
              -> Either SqlBackend ConnectionPool
              -> L.DB
-             -> NodeBlock
+             -> BlockHash
              -> IO SharedNodeState
 getNodeState sharedConfig sharedSqlBackend sharedLevelDB best = do
     sharedPeerMap       <- newTVarIO M.empty
@@ -105,7 +105,7 @@ data SharedNodeState = SharedNodeState
       -- ^ Block download window
     , sharedNetworkHeight :: !(TVar BlockHeight)
       -- ^ The current height of the network
-    , sharedBestHeader    :: !(TVar NodeBlock)
+    , sharedBestHeader    :: !(TVar BlockHash)
       -- ^ Block headers sent from a peer
     , sharedHeaders       :: !(TMVar (PeerId, Headers))
       -- ^ Block headers sent from a peer

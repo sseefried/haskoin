@@ -90,7 +90,7 @@ runIndex cfg = maybeDetach cfg $ run $ do
         ]
     db <- L.open "haskoin-index" opts
     $(logDebug) "Initializing the NodeState"
-    state <- liftIO $ getNodeState cfg (Right pool) db best
+    state <- liftIO $ getNodeState cfg (Right pool) db $ nodeHash best
     $(logDebug) "Initializing the LevelDB Index"
     runNodeT initLevelDB state
     $(logDebug) $ pack $ unwords

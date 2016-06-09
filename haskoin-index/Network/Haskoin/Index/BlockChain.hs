@@ -50,7 +50,7 @@ blockSync = do
           (a, ()) <- waitAny as
           go (delete a as)
       | otherwise = do
-          blockCheckSync
+          actionWhenSynced
           bh <- do
               -- Take the best block in the window, or look in the database
               bhM <- atomicallyNodeT bestBlockInWindow
@@ -259,16 +259,19 @@ peerBlockSource pid ph bids = do
             _ -> $(logWarn) $ formatPid pid ph
                     "Block channel closed unexpectedly"
 
-blockCheckSync :: (MonadLoggerIO m, MonadBaseControl IO m) => NodeT m ()
-blockCheckSync = do
+actionWhenSynced :: (MonadLoggerIO m, MonadBaseControl IO m) => NodeT m ()
+actionWhenSynced =
+    -- Aquire the header syncing lock to prune without screwing stuff up
+    asks sharedSyncLock >>= \lock -> liftBaseOp_ (Lock.with lock) $ do
     -- Check if we are synced
-    (synced, _, bestHead) <- areBlocksSynced
+    (synced, bestHead) <- areBlocksSynced
     initialSync <- atomicallyNodeT $ readTVarS sharedInitialSync
     when synced $ do
         $(logInfo) $ pack $ unwords
             [ "Blocks are in sync with the"
             , "network at height", show $ nodeBlockHeight bestHead
             ]
+        runSqlNodeT $ pruneChain bestHead
         -- Do a mempool sync on the first block sync
         unless initialSync $ do
             atomicallyNodeT $ do
@@ -277,12 +280,11 @@ blockCheckSync = do
             $(logInfo) "Requesting a mempool sync"
 
 areBlocksSynced :: (MonadIO m, MonadBaseControl IO m)
-                => NodeT m (Bool, NodeBlock, NodeBlock)
+                => NodeT m (Bool, NodeBlock)
 areBlocksSynced = withDBLock $ do
     (headersSynced, bestHead) <- areHeadersSynced
     bestBlock <- bestIndexedBlock
     return ( headersSynced && nodeHash bestBlock == nodeHash bestHead
-           , bestBlock
            , bestHead
            )
 
@@ -302,7 +304,7 @@ waitNewBlock :: BlockHash -> NodeT STM ()
 waitNewBlock bh = do
     node <- readTVarS sharedBestHeader
     -- We have more blocks to download
-    unless (bh /= nodeHash node) $ lift retry
+    unless (bh /= node) $ lift retry
 
 processTickles :: (MonadLoggerIO m, MonadBaseControl IO m)
                => NodeT m ()
@@ -495,8 +497,8 @@ peerHeaderSync pid ph prevM = do
                                 , "up to height", show height
                                 ]
                             -- Notify other threads that a new header is here
-                            atomicallyNodeT $
-                                writeTVarS sharedBestHeader $ last nodes
+                            atomicallyNodeT $ writeTVarS sharedBestHeader $
+                                nodeHash $ last nodes
                     -- If we received less than 2000 headers, we are done
                     -- syncing from this peer and we return Nothing.
                     return $ if length hs < 2000
