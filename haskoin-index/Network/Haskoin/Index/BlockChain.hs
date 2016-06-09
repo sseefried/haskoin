@@ -503,46 +503,6 @@ peerHeaderSync pid ph prevM = do
                         then Nothing
                         else Just action
 
--- Source of all transaction broadcasts
-txSource :: (MonadLoggerIO m, MonadBaseControl IO m)
-         => Source (NodeT m) Tx
-txSource = do
-    chan <- lift $ asks sharedTxChan
-    $(logDebug) "Waiting to receive a transaction..."
-    resM <- liftIO $ atomically $ readTBMChan chan
-    case resM of
-        Just (pid, ph, tx) -> do
-            $(logInfo) $ formatPid pid ph $ unwords
-                [ "Received inbound transaction broadcast"
-                , cs $ txHashToHex $ txHash tx
-                ]
-            yield tx >> txSource
-        _ -> $(logError) "Tx channel closed unexpectedly"
-
-handleGetData :: (MonadLoggerIO m, MonadBaseControl IO m)
-              => (TxHash -> m (Maybe Tx))
-              -> NodeT m ()
-handleGetData handler = forever $ do
-    $(logDebug) "Waiting for GetData transaction requests..."
-    -- Wait for tx GetData requests to be available
-    txids <- atomicallyNodeT $ do
-        datMap <- readTVarS sharedTxGetData
-        if M.null datMap then lift retry else return $ M.keys datMap
-    forM (nub txids) $ \tid -> lift (handler tid) >>= \txM -> do
-        $(logDebug) $ pack $ unwords
-            [ "Processing GetData txid request", cs $ txHashToHex tid ]
-        pidsM <- atomicallyNodeT $ do
-            datMap <- readTVarS sharedTxGetData
-            writeTVarS sharedTxGetData $ M.delete tid datMap
-            return $ M.lookup tid datMap
-        case (txM, pidsM) of
-            -- Send the transaction to the required peers
-            (Just tx, Just pids) -> forM_ pids $ \(pid, ph) -> do
-                $(logDebug) $ formatPid pid ph $ unwords
-                    [ "Sending tx", cs $ txHashToHex tid, "to peer" ]
-                atomicallyNodeT $ trySendMessage pid $ MTx tx
-            _ -> return ()
-
 {- LevelDB indexing database -}
 
 initLevelDB :: (MonadBaseControl IO m, MonadIO m) => NodeT m ()
@@ -559,12 +519,23 @@ indexBlock b@(Block _ txs) = do
         , cs $ blockHashToHex $ headerHash $ blockHeader b
         , "containing", show (length txs), "txs"
         ]
-    let batch = concat $ map indexTx txs
+    let batch = concat $ map txBatch txs
     withDBLock $ L.write db def batch
     return $ length batch
 
-indexTx :: Tx -> L.WriteBatch
-indexTx tx@(Tx _ txIns txOuts _) =
+indexTx :: (MonadLoggerIO m, MonadBaseControl IO m) => Tx -> NodeT m Int
+indexTx tx = do
+    db <- asks sharedLevelDB
+    $(logDebug) $ pack $ unwords
+        [ "Indexing tx"
+        , cs $ txHashToHex $ txHash tx
+        ]
+    let batch = txBatch tx
+    withDBLock $ L.write db def batch
+    return $ length batch
+
+txBatch :: Tx -> L.WriteBatch
+txBatch tx@(Tx _ txIns txOuts _) =
     batch
   where
     batch = map (\a -> L.Put (key a) val) txAddrs

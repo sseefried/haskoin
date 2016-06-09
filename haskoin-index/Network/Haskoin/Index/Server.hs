@@ -11,7 +11,9 @@ import           Control.Exception.Lifted              (ErrorCall (..),
                                                         catches)
 import qualified Control.Exception.Lifted              as E (Handler (..))
 import           Control.Concurrent.STM                (STM, atomically, retry)
-import           Control.Monad                         (forM_, forever, void,
+import           Control.Concurrent.STM.TBMChan        (readTBMChan)
+import           Control.Monad                         (forM, forM_,
+                                                        forever, void,
                                                         when, unless)
 import           Control.Monad.Logger                  (MonadLoggerIO,
                                                         filterLogger, logDebug,
@@ -26,9 +28,16 @@ import           Data.Aeson                            (decode, encode)
 import           Data.ByteString                       (ByteString)
 import qualified Data.ByteString.Lazy                  as BL (fromStrict,
                                                               toStrict)
-import           Data.Conduit                          (awaitForever, ($$))
+import           Data.Conduit                          (Source, yield,
+                                                        awaitForever, ($$))
+import           Data.Conduit.Network                  (appSink, appSource,
+                                                        clientSettings,
+                                                        runGeneralTCPClient)
+import qualified Data.Map                              as M (keys, null,
+                                                             lookup, delete)
 import qualified Data.HashMap.Strict                   as H (lookup, (!))
 import           Data.List.NonEmpty                    (NonEmpty ((:|)))
+import           Data.List                             (nub)
 import           Data.Maybe                            (fromJust, fromMaybe,
                                                         isJust)
 import           Data.String.Conversions               (cs)
@@ -94,12 +103,11 @@ runIndex cfg = maybeDetach cfg $ run $ do
         -- Initial head sync
         , runNodeT startTickle state
         -- Import solo transactions as they arrive from peers
-        , runNodeT (txSource $$ processTx) state
-        -- Respond to transaction GetData requests
-        -- TODO ...
-        -- , runNodeT (handleGetData $ (`runDBPool` pool) . getTx) state
+        , runNodeT startTxs state
         -- Run the ZMQ API server
         , runNodeT runApi state
+        -- TODO: Respond to transaction GetData requests
+        -- , runNodeT (handleGetData $ (`runDBPool` pool) . getTx) state
         ]
     _ <- waitAnyCancel as
     return ()
@@ -111,7 +119,6 @@ runIndex cfg = maybeDetach cfg $ run $ do
         (error $ "BTC nodes for " ++ networkName ++ " not found")
         (pack networkName `H.lookup` configBTCNodes cfg)
     hosts = map (\x -> PeerHost (btcNodeHost x) (btcNodePort x)) nodes
-    processTx = awaitForever $ \tx -> return () -- TODO
 
 formatBytes :: Int -> String
 formatBytes b
@@ -151,10 +158,56 @@ startTickle = do
     waitInitialSync
     $(logInfo) "Starting tickle processing"
     processTickles
-  where
-    waitInitialSync = atomicallyNodeT $ do
-        initSync <- readTVarS sharedInitialSync
-        unless initSync $ lift retry
+
+startTxs :: (MonadLoggerIO m, MonadBaseControl IO m) => NodeT m ()
+startTxs = do
+    waitInitialSync
+    $(logInfo) "Starting tx processing"
+    txSource $$ awaitForever (lift . indexTx)
+
+waitInitialSync :: (MonadLoggerIO m, MonadBaseControl IO m) => NodeT m ()
+waitInitialSync = atomicallyNodeT $ do
+    initSync <- readTVarS sharedInitialSync
+    unless initSync $ lift retry
+
+-- Source of all transaction broadcasts
+txSource :: (MonadLoggerIO m, MonadBaseControl IO m) => Source (NodeT m) Tx
+txSource = do
+    chan <- lift $ asks sharedTxChan
+    $(logDebug) "Waiting to receive a transaction..."
+    resM <- liftIO $ atomically $ readTBMChan chan
+    case resM of
+        Just (pid, ph, tx) -> do
+            $(logInfo) $ formatPid pid ph $ unwords
+                [ "Received inbound transaction broadcast"
+                , cs $ txHashToHex $ txHash tx
+                ]
+            yield tx >> txSource
+        _ -> $(logError) "Tx channel closed unexpectedly"
+
+handleGetData :: (MonadLoggerIO m, MonadBaseControl IO m)
+              => (TxHash -> m (Maybe Tx))
+              -> NodeT m ()
+handleGetData handler = forever $ do
+    $(logDebug) "Waiting for GetData transaction requests..."
+    -- Wait for tx GetData requests to be available
+    txids <- atomicallyNodeT $ do
+        datMap <- readTVarS sharedTxGetData
+        if M.null datMap then lift retry else return $ M.keys datMap
+    forM (nub txids) $ \tid -> lift (handler tid) >>= \txM -> do
+        $(logDebug) $ pack $ unwords
+            [ "Processing GetData txid request", cs $ txHashToHex tid ]
+        pidsM <- atomicallyNodeT $ do
+            datMap <- readTVarS sharedTxGetData
+            writeTVarS sharedTxGetData $ M.delete tid datMap
+            return $ M.lookup tid datMap
+        case (txM, pidsM) of
+            -- Send the transaction to the required peers
+            (Just tx, Just pids) -> forM_ pids $ \(pid, ph) -> do
+                $(logDebug) $ formatPid pid ph $ unwords
+                    [ "Sending tx", cs $ txHashToHex tid, "to peer" ]
+                atomicallyNodeT $ trySendMessage pid $ MTx tx
+            _ -> return ()
 
 broadcastTxs :: (MonadLoggerIO m, MonadBaseControl IO m)
              => [TxHash]
