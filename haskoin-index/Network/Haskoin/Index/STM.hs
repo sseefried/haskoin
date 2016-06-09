@@ -1,6 +1,8 @@
 module Network.Haskoin.Index.STM where
 
 import           Control.Concurrent               (ThreadId)
+import           Control.Concurrent.RLock         (RLock)
+import qualified Control.Concurrent.RLock         as Lock (new, with)
 import           Control.Concurrent.STM           (STM, TMVar, TVar, atomically,
                                                    isEmptyTMVar, modifyTVar',
                                                    newEmptyTMVarIO, newTVar,
@@ -8,8 +10,6 @@ import           Control.Concurrent.STM           (STM, TMVar, TVar, atomically,
                                                    readTMVar, readTVar,
                                                    takeTMVar, tryPutTMVar,
                                                    tryReadTMVar, writeTVar)
-import           Control.Concurrent.STM.Lock      (Lock)
-import qualified Control.Concurrent.STM.Lock      as Lock (new)
 import           Control.Concurrent.STM.TBMChan   (TBMChan, closeTBMChan,
                                                    newTBMChan)
 import           Control.DeepSeq                  (NFData (..))
@@ -19,14 +19,17 @@ import           Control.Monad                    ((<=<))
 import           Control.Monad.Reader             (ReaderT, ask, asks,
                                                    runReaderT)
 import           Control.Monad.Trans              (MonadIO, lift, liftIO)
-import           Control.Monad.Trans.Control      (MonadBaseControl)
+import           Control.Monad.Trans.Control      (MonadBaseControl,
+                                                   liftBaseOp_)
 import           Data.Aeson.TH                    (deriveJSON)
 import qualified Data.Map.Strict                  as M (Map, delete, empty,
-                                                        insert, lookup)
+                                                        insert, lookup,
+                                                        alter)
 import           Data.Maybe                       (isJust)
 import           Data.Typeable                    (Typeable)
 import           Data.Unique                      (Unique, hashUnique)
 import           Data.Word                        (Word64)
+import           Data.Time.Clock                  (UTCTime)
 import qualified Database.LevelDB.Base            as L (DB)
 import           Database.Persist.Sql             (ConnectionPool, SqlBackend,
                                                    SqlPersistT)
@@ -56,16 +59,16 @@ getNodeState :: Config
 getNodeState sharedConfig sharedSqlBackend sharedLevelDB best = do
     sharedPeerMap       <- newTVarIO M.empty
     sharedHostMap       <- newTVarIO M.empty
+    sharedBlockWindow   <- newTVarIO M.empty
     sharedNetworkHeight <- newTVarIO 0
     sharedBestHeader    <- newTVarIO best
     sharedHeaders       <- newEmptyTMVarIO
-    sharedHeaderPeer    <- newTVarIO Nothing
-    sharedSyncLock      <- atomically Lock.new
+    sharedSyncLock      <- Lock.new
     sharedTickleChan    <- atomically $ newTBMChan 1024
     sharedTxChan        <- atomically $ newTBMChan 1024
     sharedTxGetData     <- newTVarIO M.empty
-    sharedMempool       <- newTVarIO False
-    sharedLevelLock     <- atomically Lock.new
+    sharedInitialSync   <- newTVarIO False
+    sharedDBLock        <- Lock.new
     return SharedNodeState{..}
 
 runNodeT :: Monad m => NodeT m a -> SharedNodeState -> m a
@@ -84,20 +87,29 @@ instance NFData PeerHostSession where
 
 {- Shared Peer STM Type -}
 
+data BlockWindow = BlockWindow
+    { blockWindowPeerId    :: !(Maybe PeerId)
+    , blockWindowTimestamp :: !(Maybe UTCTime)
+    , blockWindowHeight    :: !BlockHeight
+    , blockWindowCount     :: !Int
+    , blockWindowComplete  :: !Bool
+    , blockWindowNode      :: !NodeBlock
+    }
+
 data SharedNodeState = SharedNodeState
     { sharedPeerMap       :: !(TVar (M.Map PeerId (TVar PeerSession)))
       -- ^ Map of all active peers and their sessions
     , sharedHostMap       :: !(TVar (M.Map PeerHost (TVar PeerHostSession)))
       -- ^ The peer that is currently syncing the block headers
+    , sharedBlockWindow   :: !(TVar (M.Map BlockHash BlockWindow))
+      -- ^ Block download window
     , sharedNetworkHeight :: !(TVar BlockHeight)
       -- ^ The current height of the network
     , sharedBestHeader    :: !(TVar NodeBlock)
       -- ^ Block headers sent from a peer
     , sharedHeaders       :: !(TMVar (PeerId, Headers))
       -- ^ Block headers sent from a peer
-    , sharedHeaderPeer    :: !(TVar (Maybe PeerId))
-      -- ^ Peer currently syncing headers
-    , sharedSyncLock      :: !Lock
+    , sharedSyncLock      :: !RLock
       -- ^ Lock on the header syncing process
     , sharedTxGetData     :: !(TVar (M.Map TxHash [(PeerId, PeerHost)]))
       -- ^ List of Tx GetData requests
@@ -105,13 +117,13 @@ data SharedNodeState = SharedNodeState
       -- ^ Channel containing all the block tickles received from peers
     , sharedTxChan        :: !(TBMChan (PeerId, PeerHost, Tx))
       -- ^ Transaction channel
-    , sharedMempool       :: !(TVar Bool)
-      -- ^ Did we do a Mempool sync ?
+    , sharedInitialSync   :: !(TVar Bool)
+      -- ^ Did we complete the initial blockchain sync?
     , sharedSqlBackend    :: !(Either SqlBackend ConnectionPool)
       -- ^ SQL backend or connection pool for the header tree
     , sharedLevelDB       :: !L.DB
       -- ^ LevelDB connection
-    , sharedLevelLock     :: !Lock
+    , sharedDBLock        :: !RLock
       -- ^ LevelDB lock
     , sharedConfig        :: !Config
       -- ^ Index configuration
@@ -150,6 +162,13 @@ instance NFData PeerSession where
         rnf peerSessionHost `seq`
         peerSessionThreadId `seq` ()
 
+{- Lock -}
+
+withDBLock :: MonadBaseControl IO m => NodeT m a -> NodeT m a
+withDBLock action = do
+    lock <- asks sharedDBLock
+    liftBaseOp_ (Lock.with lock) action
+
 {- Peer Hosts -}
 
 data PeerHost = PeerHost
@@ -169,6 +188,19 @@ instance NFData PeerHost where
         rnf peerPort
 
 {- Getters / Setters -}
+
+insertBlockWindow :: BlockHash -> BlockWindow -> NodeT STM ()
+insertBlockWindow key val = do
+    bwMap <- readTVarS sharedBlockWindow
+    writeTVarS sharedBlockWindow $ M.insert key val bwMap
+
+updateBlockWindow :: BlockHash -> (BlockWindow -> BlockWindow) -> NodeT STM ()
+updateBlockWindow key f = do
+    bwMap <- readTVarS sharedBlockWindow
+    writeTVarS sharedBlockWindow $ M.alter g key bwMap
+  where
+    g Nothing = Nothing
+    g (Just bw) = Just $ f bw
 
 tryGetPeerSession :: PeerId -> NodeT STM (Maybe PeerSession)
 tryGetPeerSession pid = do

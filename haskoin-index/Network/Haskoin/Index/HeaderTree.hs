@@ -3,6 +3,7 @@ module Network.Haskoin.Index.HeaderTree
 , BlockHeight
 , NodeBlock
 , Timestamp
+, isBetterChain
 , initHeaderTree
 , migrateHeaderTree
 , getBestBlock
@@ -83,6 +84,12 @@ data BlockChainAction
     | SideChain  { actionNodes :: ![NodeBlock] }
     | KnownChain { actionNodes :: ![NodeBlock] }
     deriving (Show, Eq)
+
+isBetterChain :: BlockChainAction -> Bool
+isBetterChain a = case a of
+    BestChain _ -> True
+    ChainReorg _ _ _ -> True
+    _ -> False
 
 type MinWork = Word32
 

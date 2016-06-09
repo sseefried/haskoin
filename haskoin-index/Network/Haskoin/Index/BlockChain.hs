@@ -1,8 +1,9 @@
 module Network.Haskoin.Index.BlockChain where
 
 import           Control.Concurrent               (threadDelay)
+import           Control.Concurrent.Async.Lifted  (Async, async, wait, waitAny)
+import qualified Control.Concurrent.RLock         as Lock (with)
 import           Control.Concurrent.STM           (STM, atomically, retry)
-import qualified Control.Concurrent.STM.Lock      as Lock (with)
 import           Control.Concurrent.STM.TBMChan   (readTBMChan)
 import           Control.Exception.Lifted         (throw)
 import           Control.Monad                    (forM, forM_, forever, unless,
@@ -17,9 +18,11 @@ import qualified Data.ByteString                  as BS (append, splitAt, take)
 import           Data.Conduit                     (Source, await, yield, ($$))
 import           Data.Default                     (def)
 import           Data.Either                      (rights)
-import           Data.List                        (delete, nub)
-import qualified Data.Map                         as M (delete, keys, lookup,
-                                                        null)
+import           Data.List                        (delete, nub, sortBy)
+import qualified Data.Map                         as M (delete, fromList,
+                                                        insert, keys, lookup,
+                                                        notMember, null,
+                                                        toList, elems)
 import           Data.Maybe                       (isNothing, listToMaybe)
 import           Data.String.Conversions          (cs)
 import           Data.Text                        (pack)
@@ -38,107 +41,177 @@ import           Network.Haskoin.Script
 import           Network.Haskoin.Transaction
 import           Network.Haskoin.Util
 
+blockSync :: (MonadLoggerIO m, MonadBaseControl IO m) => NodeT m ()
+blockSync = do
+    go []
+  where
+    go as
+      | length as >= 5 = do
+          (a, ()) <- waitAny as
+          go (delete a as)
+      | otherwise = do
+          blockCheckSync
+          bh <- do
+              -- Take the best block in the window, or look in the database
+              bhM <- atomicallyNodeT bestBlockInWindow
+              maybe bestIndexedBlock return bhM
+          -- Wait either for a new block to arrive
+          $(logDebug) "Waiting for a new block..."
+          _ <- atomicallyNodeT $ waitNewBlock $ nodeHash bh
+          $(logDebug) $ pack $ unwords
+              [ "Requesting download from block"
+              , cs $ blockHashToHex (nodeHash bh)
+              ]
+          -- Get the list of blocks to download from our headers
+          action <- runSqlNodeT $ do
+              bestH <- getBestBlock
+              getBlockWindow bestH bh 500
+          case actionNodes action of
+              [] -> do
+                  $(logError) "BlockChainAction was empty. Retrying ..."
+                  -- Sleep 10 seconds and retry
+                  liftIO $ threadDelay $ 10*1000000
+                  go as
+              ns -> do
+                  let head   = nodeHash $ last ns
+                      height = nodeBlockHeight $ last ns
+                      bw = BlockWindow Nothing Nothing height 0 False $ last ns
+                  -- Save an entry into the window
+                  atomicallyNodeT $ insertBlockWindow head bw
+                  a <- async $ blockDownload action
+                  go (a:as)
+
+bestBlockInWindow :: NodeT STM (Maybe NodeBlock)
+bestBlockInWindow = do
+    bwMap <- readTVarS sharedBlockWindow
+    -- Sort by descending height
+    let s a b = blockWindowHeight b `compare` blockWindowHeight a
+    return $ listToMaybe $ map blockWindowNode $ sortBy s $ M.elems bwMap
+
+-- Download the given BlockChainAction. It will retry if the download times out.
 blockDownload
     :: (MonadLoggerIO m, MonadBaseControl IO m)
-    => Word32
+    => BlockChainAction
     -> NodeT m ()
-blockDownload batchSize = do
-    blockCheckSync
-    bh <- withLevelDB bestIndexedBlock
-    -- Wait either for a new block to arrive
-    $(logDebug) "Waiting for a new block..."
-    _ <- atomicallyNodeT $ waitNewBlock $ nodeHash bh
-    $(logDebug) $ pack $ unwords
-        [ "Requesting download from block"
-        , cs $ blockHashToHex (nodeHash bh)
-        , "and batch size", show batchSize
-        ]
-    -- Get the list of blocks to download from our headers
-    action <- runSqlNodeT $ do
-        bestH <- getBestBlock
-        getBlockWindow bestH bh batchSize
-    case actionNodes action of
-        [] -> do
-            $(logError) "BlockChainAction was empty. Retrying ..."
-            -- Sleep 10 seconds and retry
-            liftIO $ threadDelay $ 10*1000000
-        ns -> do
-            -- Wait for a peer available for block downloads
-            (pid, PeerSession{..}) <- atomicallyNodeT $ waitDownloadPeer $
-                nodeBlockHeight $ last ns
-            $(logDebug) $ formatPid pid peerSessionHost
-                "Found a peer to download blocks"
-            -- index the blocks
-            startTime <- liftIO getCurrentTime
-            (resM, cnt) <-
-                peerBlockSource pid peerSessionHost (map nodeHash ns) $$
-                indexBlocks
-            endTime <- liftIO getCurrentTime
-            let diff = diffUTCTime endTime startTime
+blockDownload action = do
+    -- Wait for a peer available for block downloads
+    (pid, PeerSession{..}) <- atomicallyNodeT $ do
+        (pid, sess) <- waitFreePeer
+        updateBlockWindow head $
+            \bw -> bw{ blockWindowPeerId = Just pid }
+        return (pid, sess)
+    $(logInfo) $ formatPid pid peerSessionHost $ unwords
+        [ "Found a peer to download blocks at height", show height ]
+
+    -- save the starting time
+    now <- liftIO getCurrentTime
+    atomicallyNodeT $ updateBlockWindow head $
+        \bw -> bw{ blockWindowTimestamp = Just now }
+
+    -- index the blocks
+    startTime <- liftIO getCurrentTime
+    (resM, cnt) <-
+        peerBlockSource pid peerSessionHost (map nodeHash ns) $$ indexBlocks
+    endTime <- liftIO getCurrentTime
+    let diff = diffUTCTime endTime startTime
+
+    -- Check if the full batch was downloaded
+    if (headerHash . blockHeader <$> resM) == Just head
+        then withDBLock $ do
             logBlockChainAction action
-            -- Update the best block
-            case (action, resM) of
-                (BestChain _, Just b) -> do
-                    nodeM <-  runSqlNodeT $ getBlockByHash $
-                        headerHash $ blockHeader b
+            $(logInfo) $ formatPid pid peerSessionHost $ unwords
+                [ "Blocks indexed at height"
+                , show height, "in", show diff
+                , "(", show cnt, "values", ")"
+                ]
+            bwDone <- atomicallyNodeT $ do
+                updateBlockWindow head $ \bw ->
+                    bw{ blockWindowComplete = True
+                      , blockWindowPeerId   = Nothing
+                      }
+                cleanBlockWindow
+            case bwDone of
+                -- Out of order blocks are not a problem
+                [] -> $(logInfo) $ formatPid pid peerSessionHost $
+                    unwords [ "Out of order indexed blocks at height"
+                            , show height
+                            ]
+                _  -> do
+                    let bh = fst $ last bwDone
+                    nodeM <- runSqlNodeT $ getBlockByHash bh
                     case nodeM of
                         Just node -> do
-                            withLevelDB $ setBestIndexedBlock node
+                            setBestIndexedBlock node
                             $(logInfo) $ formatPid pid peerSessionHost $
-                                unwords [ "Blocks indexed up to height"
+                                unwords [ "Updating best indexed block to"
+                                        , cs $ blockHashToHex bh
+                                        , "at height"
                                         , show $ nodeBlockHeight node
-                                        , "in", show diff
-                                        , "(", show cnt, "values", ")"
                                         ]
                         _ -> $(logWarn) $ formatPid pid peerSessionHost $
                             unwords [ "Could not set best indexed block"
-                                    , cs $ blockHashToHex $
-                                        headerHash $ blockHeader b
+                                    , cs $ blockHashToHex bh
                                     ]
-                _ -> return ()
-    blockDownload batchSize
+        else do
+            $(logWarn) $ formatPid pid peerSessionHost $
+                unwords [ "Peer sent us incomplete block list for request"
+                        , cs $ blockHashToHex head
+                        , "at height"
+                        , show height
+                        ]
+            atomicallyNodeT $ updateBlockWindow head $ \bw ->
+                bw { blockWindowPeerId    = Nothing
+                   , blockWindowTimestamp = Nothing
+                   , blockWindowCount     = 0
+                   , blockWindowComplete  = False
+                   }
+            blockDownload action
   where
+    ns     = actionNodes action
+    head   = nodeHash $ last ns
+    height = nodeBlockHeight $ last ns
     indexBlocks = go Nothing 0
     go prevM cnt = await >>= \resM -> case resM of
         Just b -> do
+            lift $ atomicallyNodeT $ updateBlockWindow head $ \bw ->
+                bw{ blockWindowCount = blockWindowCount bw + 1 }
             cnt' <- lift $ indexBlock b
             go resM $ cnt + cnt'
         _ -> return (prevM, cnt)
     logBlockChainAction action = case action of
         BestChain nodes -> $(logInfo) $ pack $ unwords
-            [ "Best chain height"
+            [ "Indexed best chain at height"
             , show $ nodeBlockHeight $ last nodes
             , "(", cs $ blockHashToHex $ nodeHash $ last nodes
             , ")"
             ]
         ChainReorg _ o n -> $(logInfo) $ pack $ unlines $
-            [ "Chain reorg."
+            [ "Indexed chain reorg."
             , "Orphaned blocks:"
             ]
             ++ map (("  " ++) . cs . blockHashToHex . nodeHash) o
             ++ [ "New blocks:" ]
             ++ map (("  " ++) . cs . blockHashToHex . nodeHash) n
-            ++ [ unwords [ "Best merkle chain height"
+            ++ [ unwords [ "Best block chain height"
                         , show $ nodeBlockHeight $ last n
                         ]
             ]
         SideChain n -> $(logWarn) $ pack $ unlines $
-            "Side chain:" :
+            "Indexed side chain:" :
             map (("  " ++) . cs . blockHashToHex . nodeHash) n
         KnownChain n -> $(logWarn) $ pack $ unlines $
-            "Known chain:" :
+            "Indexed Known chain:" :
             map (("  " ++) . cs . blockHashToHex . nodeHash) n
 
-waitDownloadPeer :: BlockHeight -> NodeT STM (PeerId, PeerSession)
-waitDownloadPeer height = do
-    pidM     <- readTVarS sharedHeaderPeer
-    allPeers <- getPeersAtHeight (>= height)
-    let f (pid,_) = Just pid /= pidM
-        -- Filter out the peer syncing headers (if there is one)
-        peers = filter f allPeers
-    case peers of
-        (res:_) -> return res
-        _       -> lift retry
+-- Remove completed block windows at the start
+cleanBlockWindow :: NodeT STM [(BlockHash, BlockWindow)]
+cleanBlockWindow = do
+    bwMap <- readTVarS sharedBlockWindow
+    let s (_,a) (_,b) = (blockWindowHeight a) `compare` (blockWindowHeight b)
+        bwSorted = sortBy s $ M.toList bwMap
+        (bwDone, bwRest) = span (blockWindowComplete . snd) bwSorted
+    writeTVarS sharedBlockWindow $ M.fromList bwRest
+    return bwDone
 
 peerBlockSource
     :: (MonadLoggerIO m, MonadBaseControl IO m)
@@ -169,12 +242,12 @@ peerBlockSource pid ph bids = do
                 let mBid = headerHash $ blockHeader block
                 $(logDebug) $ formatPid pid ph $ unwords
                     [ "Processing block", cs $ blockHashToHex mBid ]
-                -- Check if we were expecting this merkle block
+                -- Check if we were expecting this block
                 if mBid `elem` rBids
                     then yield block >> goSource chan (mBid `delete` rBids)
                     else lift $ do
-                        -- If we were not expecting this merkle block, do not
-                        -- yield the merkle block and close the source
+                        -- If we were not expecting this block, do not
+                        -- yield the block and close the source
                         $(logError) $ formatPid pid ph $ unwords
                             [ "Peer sent us an unexpected block hash"
                             , cs $ blockHashToHex mBid
@@ -184,30 +257,30 @@ peerBlockSource pid ph bids = do
             Right _ -> return ()
             -- Timeout reached
             _ -> $(logWarn) $ formatPid pid ph
-                    "Merkle channel closed unexpectedly"
+                    "Block channel closed unexpectedly"
 
 blockCheckSync :: (MonadLoggerIO m, MonadBaseControl IO m) => NodeT m ()
 blockCheckSync = do
     -- Check if we are synced
     (synced, _, bestHead) <- areBlocksSynced
-    mempool <- atomicallyNodeT $ readTVarS sharedMempool
+    initialSync <- atomicallyNodeT $ readTVarS sharedInitialSync
     when synced $ do
         $(logInfo) $ pack $ unwords
             [ "Blocks are in sync with the"
             , "network at height", show $ nodeBlockHeight bestHead
             ]
-        -- Do a mempool sync on the first merkle sync
-        unless mempool $ do
+        -- Do a mempool sync on the first block sync
+        unless initialSync $ do
             atomicallyNodeT $ do
                 sendMessageAll MMempool
-                writeTVarS sharedMempool True
+                writeTVarS sharedInitialSync True
             $(logInfo) "Requesting a mempool sync"
 
 areBlocksSynced :: (MonadIO m, MonadBaseControl IO m)
                 => NodeT m (Bool, NodeBlock, NodeBlock)
-areBlocksSynced = do
+areBlocksSynced = withDBLock $ do
     (headersSynced, bestHead) <- areHeadersSynced
-    bestBlock <- withLevelDB bestIndexedBlock
+    bestBlock <- bestIndexedBlock
     return ( headersSynced && nodeHash bestBlock == nodeHash bestHead
            , bestBlock
            , bestHead
@@ -216,7 +289,7 @@ areBlocksSynced = do
 -- Check if the block headers are synced with the network height
 areHeadersSynced :: (MonadIO m, MonadBaseControl IO m)
                  => NodeT m (Bool, NodeBlock)
-areHeadersSynced = do
+areHeadersSynced = withDBLock $ do
     bestHead <- runSqlNodeT getBestBlock
     netHeight <- atomicallyNodeT $ readTVarS sharedNetworkHeight
     -- If netHeight == 0 then we did not connect to any peers yet
@@ -228,7 +301,7 @@ areHeadersSynced = do
 waitNewBlock :: BlockHash -> NodeT STM ()
 waitNewBlock bh = do
     node <- readTVarS sharedBestHeader
-    -- We have more merkle blocks to download
+    -- We have more blocks to download
     unless (bh /= nodeHash node) $ lift retry
 
 processTickles :: (MonadLoggerIO m, MonadBaseControl IO m)
@@ -286,62 +359,19 @@ headerSync :: (MonadLoggerIO m, MonadBaseControl IO m)
            => NodeT m ()
 headerSync = do
     -- Start the header sync
-    $(logDebug) "Syncing more headers. Finding the best peer..."
-    (pid, PeerSession{..}) <- atomicallyNodeT $ do
-        peers <- getPeersAtNetHeight
-        case listToMaybe peers of
-            Just res@(pid,_) -> do
-                -- Save the header syncing peer
-                writeTVarS sharedHeaderPeer $ Just pid
-                return res
-            _ -> lift retry
+    $(logInfo) "Starting the header sync"
+    (pid, PeerSession{..}) <- atomicallyNodeT waitFreePeer
 
-    $(logDebug) $ formatPid pid peerSessionHost "Found a peer to sync headers"
+    $(logDebug) $ formatPid pid peerSessionHost "Syncing headers from this peer"
 
-    -- Run a maximum of 10 header downloads with this peer.
-    -- Then we re-evaluate the best peer
-    continue <- catchAny (peerHeaderSyncLimit pid peerSessionHost 10) $
-        \e -> do
+    continue <- catchAny
+        (peerHeaderSyncFull pid peerSessionHost >> return False) $ \e -> do
             $(logError) $ pack $ show e
             disconnectPeer pid peerSessionHost >> return True
 
-    -- Reset the header syncing peer
-    atomicallyNodeT $ writeTVarS sharedHeaderPeer Nothing
-
-    -- Check if we should continue the header sync
-    if continue then headerSync else do
-        (synced, bestHead) <- areHeadersSynced
-        if synced
-            then do
-                -- Check if blocks are synced
-                blockCheckSync
-                $(logInfo) $ formatPid pid peerSessionHost $ unwords
-                    [ "Block headers are in sync with the"
-                    , "network at height", show $ nodeBlockHeight bestHead
-                    ]
-            -- Continue the download if we are not yet synced
-            else headerSync
-
-peerHeaderSyncLimit :: (MonadLoggerIO m, MonadBaseControl IO m)
-                    => PeerId
-                    -> PeerHost
-                    -> Int
-                    -> NodeT m Bool
-peerHeaderSyncLimit pid ph initLimit
-    | initLimit < 1 = error "Limit must be at least 1"
-    | otherwise = go initLimit Nothing
-  where
-    go limit prevM = peerHeaderSync pid ph prevM >>= \actionM -> case actionM of
-        Just action ->
-            -- If we received a side chain or a known chain, we want to
-            -- continue szncing from this peer even if the limit has been
-            -- reached.
-            if limit > 1 || isSideChain action || isKnownChain action
-                then go (limit - 1) actionM
-                -- We got a Just, so we can continue the download from
-                -- this peer
-                else return True
-        _ -> return False
+    -- Recurse if the headersync crashed
+    if continue then headerSync else
+        $(logDebug) "Header sync complete"
 
 -- Sync all the headers from a given peer
 peerHeaderSyncFull :: (MonadLoggerIO m, MonadBaseControl IO m)
@@ -515,26 +545,22 @@ handleGetData handler = forever $ do
 
 {- LevelDB indexing database -}
 
-withLevelDB :: MonadBaseControl IO m => (L.DB -> NodeT m a) -> NodeT m a
-withLevelDB action = do
-    lock <- asks sharedSyncLock
-    db   <- asks sharedLevelDB
-    liftBaseOp_ (Lock.with lock) $ action db
-
-initLevelDB :: (MonadBaseControl IO m, MonadIO m) => L.DB -> NodeT m ()
-initLevelDB db = do
-    resM <- L.get db def "0-bestindexedblock"
-    when (isNothing resM) $ setBestIndexedBlock genesisBlock db
+initLevelDB :: (MonadBaseControl IO m, MonadIO m) => NodeT m ()
+initLevelDB = withDBLock $ do
+    db <- asks sharedLevelDB
+    resM <- liftIO $ L.get db def "0-bestindexedblock"
+    when (isNothing resM) $ setBestIndexedBlock genesisBlock
 
 indexBlock :: (MonadLoggerIO m, MonadBaseControl IO m) => Block -> NodeT m Int
 indexBlock b@(Block _ txs) = do
+    db <- asks sharedLevelDB
     $(logDebug) $ pack $ unwords
         [ "Indexing block"
         , cs $ blockHashToHex $ headerHash $ blockHeader b
         , "containing", show (length txs), "txs"
         ]
     let batch = concat $ map indexTx txs
-    withLevelDB $ \db -> L.write db def batch
+    withDBLock $ L.write db def batch
     return $ length batch
 
 indexTx :: Tx -> L.WriteBatch
@@ -549,16 +575,18 @@ indexTx tx@(Tx _ txIns txOuts _) =
     fIn  = inputAddress <=< (decodeInputBS . scriptInput)
     fOut = outputAddress <=< (decodeOutputBS . scriptOutput)
 
-bestIndexedBlock :: (MonadBaseControl IO m, MonadIO m)
-                 => L.DB -> NodeT m NodeBlock
-bestIndexedBlock db = do
+bestIndexedBlock :: (MonadBaseControl IO m, MonadIO m) => NodeT m NodeBlock
+bestIndexedBlock = withDBLock $ do
+    db <- asks sharedLevelDB
     -- Start the key with 0 as it is smaller than all base58 characters
-    resM <- L.get db def "0-bestindexedblock"
+    resM <- liftIO $ L.get db def "0-bestindexedblock"
     case resM of
         Just bs -> return $ decode' bs
         _ -> error "No best indexed block in the database"
 
 setBestIndexedBlock :: (MonadBaseControl IO m, MonadIO m)
-                    => NodeBlock -> L.DB -> NodeT m ()
-setBestIndexedBlock node db = L.put db def "0-bestindexedblock" $ encode' node
+                    => NodeBlock -> NodeT m ()
+setBestIndexedBlock node = withDBLock $ do
+    db <- asks sharedLevelDB
+    L.put db def "0-bestindexedblock" $ encode' node
 

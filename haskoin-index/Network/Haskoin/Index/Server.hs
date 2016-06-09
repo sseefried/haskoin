@@ -10,14 +10,15 @@ import           Control.Exception.Lifted              (ErrorCall (..),
                                                         SomeException (..),
                                                         catches)
 import qualified Control.Exception.Lifted              as E (Handler (..))
+import           Control.Concurrent.STM                (STM, atomically, retry)
 import           Control.Monad                         (forM_, forever, void,
-                                                        when)
+                                                        when, unless)
 import           Control.Monad.Logger                  (MonadLoggerIO,
                                                         filterLogger, logDebug,
                                                         logError, logInfo,
                                                         runStdoutLoggingT)
 import           Control.Monad.Reader                  (asks)
-import           Control.Monad.Trans                   (liftIO)
+import           Control.Monad.Trans                   (liftIO, lift)
 import           Control.Monad.Trans.Control           (MonadBaseControl,
                                                         liftBaseOpDiscard)
 import           Control.Monad.Trans.Resource          (runResourceT)
@@ -82,16 +83,16 @@ runIndex cfg = maybeDetach cfg $ run $ do
     $(logDebug) "Initializing the NodeState"
     state <- liftIO $ getNodeState cfg (Right pool) db best
     $(logDebug) "Initializing the LevelDB Index"
-    runNodeT (withLevelDB initLevelDB) state
+    runNodeT initLevelDB state
     $(logDebug) $ pack $ unwords
         [ "Starting indexer with", show $ length hosts, "hosts" ]
     as <- mapM async
         -- Spin up all the peers
         [ runNodeT (void $ mapConcurrently startPeer hosts) state
-        -- Initial head sync and tickle processing
-        , runNodeT startTickles state
         -- Blockchain download and address indexing
-        , runNodeT (blockDownload 500) state
+        , runNodeT (headerSync >> blockSync) state
+        -- Initial head sync
+        , runNodeT startTickle state
         -- Import solo transactions as they arrive from peers
         , runNodeT (txSource $$ processTx) state
         -- Respond to transaction GetData requests
@@ -145,13 +146,15 @@ initDatabase cfg = do
     -- Return the semaphrone and the connection pool
     return pool
 
-startTickles :: (MonadLoggerIO m, MonadBaseControl IO m) => NodeT m ()
-startTickles = do
-    $(logInfo) "Starting the initial header sync"
-    headerSync
-    $(logInfo) "Initial header sync complete"
-    $(logDebug) "Starting the tickle processing thread"
+startTickle :: (MonadLoggerIO m, MonadBaseControl IO m) => NodeT m ()
+startTickle = do
+    waitInitialSync
+    $(logInfo) "Starting tickle processing"
     processTickles
+  where
+    waitInitialSync = atomicallyNodeT $ do
+        initSync <- readTVarS sharedInitialSync
+        unless initSync $ lift retry
 
 broadcastTxs :: (MonadLoggerIO m, MonadBaseControl IO m)
              => [TxHash]

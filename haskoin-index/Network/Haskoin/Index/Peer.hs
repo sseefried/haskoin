@@ -29,10 +29,9 @@ import           Data.Conduit.Network             (appSink, appSource,
                                                    clientSettings,
                                                    runGeneralTCPClient)
 import           Data.Conduit.TMChan              (sourceTBMChan)
-import           Data.List                        (nub, sort)
+import           Data.List                        (nub)
 import qualified Data.Map                         as M (assocs, elems, fromList,
                                                         keys, unionWith)
-import           Data.Maybe                       (fromMaybe, listToMaybe)
 import           Data.String.Conversions          (cs)
 import           Data.Text                        (Text, pack)
 import           Data.Time.Clock                  (diffUTCTime, getCurrentTime)
@@ -86,9 +85,6 @@ startPeer ph@PeerHost{..} = do
     cleanupPeer pid = do
         $(logWarn) $ formatPid pid ph "Peer is closing. Running cleanup..."
         atomicallyNodeT $ do
-            -- Remove the header syncing peer if necessary
-            hPidM <- readTVarS sharedHeaderPeer
-            when (hPidM == Just pid) $ writeTVarS sharedHeaderPeer Nothing
             -- Remove the session and close the channels
             _ <- removePeerSession pid
             -- Update the network height
@@ -366,7 +362,6 @@ peerPing pid ph = forever $ do
     warnPing nonce = do
         $(logWarn) $ formatPid pid ph $ concat
             [ "Did not receive a timely reply for Ping ", show nonce
-            , ". Reconnecting the peer."
             ]
 
 peerHandshake :: (MonadLoggerIO m, MonadBaseControl IO m)
@@ -459,16 +454,30 @@ disconnectPeer pid ph = do
 
 {- Peer utility functions -}
 
--- Returns the median height of all the peers
-getMedianHeight :: NodeT STM BlockHeight
-getMedianHeight = do
-    hs <- map (peerSessionHeight . snd) <$> getConnectedPeers
-    let (_,ms) = splitAt (length hs `div` 2) $ sort hs
-    return $ fromMaybe 0 $ listToMaybe ms
+-- Get a free peer that is at least at the network height
+waitFreePeer :: NodeT STM (PeerId, PeerSession)
+waitFreePeer = do
+    bwMap    <- readTVarS sharedBlockWindow
+    allPeers <- getPeersAtNetHeight
+    let busyPeers = map blockWindowPeerId $ M.elems bwMap
+        freePeer (pid,_) = not $ Just pid `elem` busyPeers
+        -- Only take available peers
+        peers = filter freePeer allPeers
+    case peers of
+        (res:_) -> return res
+        _       -> lift retry
 
--- Set the network height to the median height of all peers.
+-- Returns the best height of all the peers
+getBestPeerHeight :: NodeT STM BlockHeight
+getBestPeerHeight = do
+    hs <- map (peerSessionHeight . snd) <$> getConnectedPeers
+    return $ case hs of
+        [] -> 0
+        _  -> maximum hs
+
+-- Set the network height to the best height of all peers.
 updateNetworkHeight :: NodeT STM ()
-updateNetworkHeight = writeTVarS sharedNetworkHeight =<< getMedianHeight
+updateNetworkHeight = writeTVarS sharedNetworkHeight =<< getBestPeerHeight
 
 getPeers :: NodeT STM [(PeerId, PeerSession)]
 getPeers = do

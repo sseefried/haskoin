@@ -120,16 +120,24 @@ printNodeStatus NodeStatus{..} =
     , "Best Block        : " ++ cs (blockHashToHex nodeStatusBestBlock)
     , "Best Block Height : " ++ show nodeStatusBestBlockHeight
     ] ++
-    [ "Header Peer       : " ++ show h
-    | h <- maybeToList nodeStatusHeaderPeer
+    [ "Block Window      : " ] ++
+    [ unwords [ "  - Height: " ++ show h ++ ","
+              , "Downloaded: " ++ show i ++ ","
+              , "Peer: " ++ fromMaybe "not nassigned" (show <$> p) ++ ","
+              , "Started: " ++ fromMaybe "not started" (show <$> t) ++ ","
+              , "Complete: " ++ show c
+              , "(" ++ cs (blockHashToHex b) ++ ")"
+              ]
+    | (b,p,t,h,i,c) <- nodeStatusBlockWindow
     ] ++
-    [ "Pending Headers   : " ++ show nodeStatusHaveHeaders ] ++
-    [ "Pending Tickles   : " ++ show nodeStatusHaveTickles ] ++
-    [ "Pending Txs       : " ++ show nodeStatusHaveTxs ] ++
-    [ "Pending GetData   : " ++ show (map txHashToHex nodeStatusGetData) ] ++
-    [ "Synced Mempool    : " ++ show nodeStatusMempool ] ++
-    [ "HeaderSync Lock   : " ++ show nodeStatusSyncLock ] ++
-    [ "LevelDB Lock      : " ++ show nodeStatusLevelLock ] ++
+    [ "Pending Headers   : " ++ show nodeStatusHaveHeaders
+    , "Pending Tickles   : " ++ show nodeStatusHaveTickles
+    , "Pending Txs       : " ++ show nodeStatusHaveTxs
+    , "Pending GetData   : " ++ show (map txHashToHex nodeStatusGetData)
+    , "Initial Sync      : " ++ show nodeStatusInitialSync
+    , "HeaderSync Lock   : " ++ show nodeStatusSyncLock
+    , "LevelDB Lock      : " ++ show nodeStatusLevelLock
+    ] ++
     [ "Peers: " ] ++
     intercalate ["-"] (map printPeerStatus nodeStatusPeers)
 

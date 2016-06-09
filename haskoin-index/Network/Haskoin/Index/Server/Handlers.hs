@@ -1,12 +1,12 @@
 module Network.Haskoin.Index.Server.Handlers where
 
 import           Control.Concurrent.STM           (STM, isEmptyTMVar, readTVar)
-import           Control.Concurrent.STM.Lock      (locked)
+import           Control.Concurrent.RLock         (state)
 import           Control.Concurrent.STM.TBMChan   (isEmptyTBMChan)
 import           Control.Monad                    (mzero)
 import           Control.Monad.Logger             (MonadLoggerIO, logInfo)
 import           Control.Monad.Reader             (ask)
-import           Control.Monad.Trans              (MonadIO, lift)
+import           Control.Monad.Trans              (MonadIO, lift, liftIO)
 import           Control.Monad.Trans.Control      (MonadBaseControl)
 import           Data.Aeson                       (FromJSON, ToJSON, object,
                                                    parseJSON, toJSON,
@@ -18,10 +18,12 @@ import           Data.Aeson.Types                 (Options (..),
                                                    defaultTaggedObject)
 import qualified Data.ByteString.Char8            as C (unpack)
 import           Data.Char                        (toLower)
-import qualified Data.Map.Strict                  as M (keys)
+import qualified Data.Map.Strict                  as M (Map, keys, assocs)
+import           Data.Time.Clock                  (UTCTime)
 import           Data.Text                        (Text, pack)
 import           Data.Unique                      (hashUnique)
 import           Data.Word                        (Word32)
+import           Data.List                        (sortBy)
 import           Network.Haskoin.Block
 import           Network.Haskoin.Index.BlockChain
 import           Network.Haskoin.Index.HeaderTree
@@ -50,6 +52,28 @@ data PeerStatus = PeerStatus
 
 $(deriveJSON (dropFieldLabel 10) ''PeerStatus)
 
+-- Same type as RLock.State but the ThreadId is represented as a String
+-- (show threadid)
+data LockState = LockState { lockState :: !(Maybe (String, Integer)) }
+    deriving (Show)
+
+instance ToJSON LockState where
+    toJSON (LockState s) = case s of
+        Nothing -> object [ "lock-count" .= (0 :: Integer) ]
+        Just (tid, cnt) -> object
+            [ "lock-count"  .= cnt
+            , "lock-thread" .= tid
+            ]
+
+instance FromJSON LockState where
+    parseJSON = withObject "LockState" $ \o -> do
+        cnt <- o .: "lock-count"
+        if cnt == 0
+           then return $ LockState Nothing
+           else do
+               tid <- o .: "lock-thread"
+               return $ LockState $ Just (tid, cnt)
+
 data NodeStatus = NodeStatus
     -- Regular fields
     { nodeStatusPeers            :: ![PeerStatus]
@@ -58,19 +82,23 @@ data NodeStatus = NodeStatus
     , nodeStatusBestHeaderHeight :: !BlockHeight
     , nodeStatusBestBlock        :: !BlockHash
     , nodeStatusBestBlockHeight  :: !BlockHeight
-    -- Debug fields
-    , nodeStatusHeaderPeer       :: !(Maybe Int)
+    , nodeStatusBlockWindow      :: ![( BlockHash
+                                      , Maybe Int -- Peer ID
+                                      , Maybe UTCTime
+                                      , BlockHeight
+                                      , Int -- Block count
+                                      , Bool -- Completed
+                                      )]
     , nodeStatusHaveHeaders      :: !Bool
     , nodeStatusHaveTickles      :: !Bool
     , nodeStatusHaveTxs          :: !Bool
     , nodeStatusGetData          :: ![TxHash]
-    , nodeStatusMempool          :: !Bool
-    , nodeStatusSyncLock         :: !Bool
-    , nodeStatusLevelLock        :: !Bool
+    , nodeStatusInitialSync      :: !Bool
+    , nodeStatusSyncLock         :: !LockState
+    , nodeStatusLevelLock        :: !LockState
     }
 
 $(deriveJSON (dropFieldLabel 10) ''NodeStatus)
-
 
 {- Request/Response types -}
 
@@ -139,25 +167,31 @@ getNodeStatusR = do
 nodeStatus :: (MonadIO m, MonadBaseControl IO m) => NodeT m NodeStatus
 nodeStatus = do
     SharedNodeState{..} <- ask
-    best   <- withLevelDB bestIndexedBlock
+    best   <- bestIndexedBlock
     header <- runSqlNodeT getBestBlock
+    syncLock <- liftIO $ state sharedSyncLock
+    levelLock <- liftIO $ state sharedDBLock
     let nodeStatusBestBlock        = nodeHash best
         nodeStatusBestBlockHeight  = nodeBlockHeight best
         nodeStatusBestHeader       = nodeHash header
         nodeStatusBestHeaderHeight = nodeBlockHeight header
+        f (tid, cnt) = (show tid, cnt)
+        nodeStatusSyncLock  = LockState $ f <$> syncLock
+        nodeStatusLevelLock = LockState $ f <$> levelLock
     atomicallyNodeT $ do
         nodeStatusPeers <- mapM peerStatus =<< getPeers
         lift $ do
-            nodeStatusHeaderPeer <-
-                fmap hashUnique <$> readTVar sharedHeaderPeer
+            let g (b, BlockWindow p t h i c _) = (b,hashUnique <$> p,t,h,i,c)
+                s (_,a) (_,b) =
+                    blockWindowHeight a `compare` blockWindowHeight b
+            nodeStatusBlockWindow <-
+                (map g . sortBy s . M.assocs) <$> readTVar sharedBlockWindow
             nodeStatusNetworkHeight <- readTVar sharedNetworkHeight
             nodeStatusHaveHeaders <- not <$> isEmptyTMVar sharedHeaders
             nodeStatusHaveTickles <- not <$> isEmptyTBMChan sharedTickleChan
             nodeStatusHaveTxs <- not <$> isEmptyTBMChan sharedTxChan
             nodeStatusGetData <- M.keys <$> readTVar sharedTxGetData
-            nodeStatusMempool <- readTVar sharedMempool
-            nodeStatusSyncLock <- locked sharedSyncLock
-            nodeStatusLevelLock <- locked sharedSyncLock
+            nodeStatusInitialSync <- readTVar sharedInitialSync
             return NodeStatus{..}
 
 peerStatus :: (PeerId, PeerSession) -> NodeT STM PeerStatus
