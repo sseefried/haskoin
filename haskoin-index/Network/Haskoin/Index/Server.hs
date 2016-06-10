@@ -6,21 +6,21 @@ module Network.Haskoin.Index.Server
 
 import           Control.Concurrent.Async.Lifted       (async, mapConcurrently,
                                                         waitAnyCancel)
+import           Control.Concurrent.STM                (STM, atomically, retry)
+import           Control.Concurrent.STM.TBMChan        (readTBMChan)
 import           Control.Exception.Lifted              (ErrorCall (..),
                                                         SomeException (..),
                                                         catches)
 import qualified Control.Exception.Lifted              as E (Handler (..))
-import           Control.Concurrent.STM                (STM, atomically, retry)
-import           Control.Concurrent.STM.TBMChan        (readTBMChan)
-import           Control.Monad                         (forM, forM_,
-                                                        forever, void,
-                                                        when, unless)
+import           Control.Monad                         (forM, forM_, forever,
+                                                        unless, void, when)
+import           Control.Monad.Catch                   (MonadMask)
 import           Control.Monad.Logger                  (MonadLoggerIO,
                                                         filterLogger, logDebug,
                                                         logError, logInfo,
                                                         runStdoutLoggingT)
 import           Control.Monad.Reader                  (asks)
-import           Control.Monad.Trans                   (liftIO, lift)
+import           Control.Monad.Trans                   (lift, liftIO)
 import           Control.Monad.Trans.Control           (MonadBaseControl,
                                                         liftBaseOpDiscard)
 import           Control.Monad.Trans.Resource          (runResourceT)
@@ -28,16 +28,16 @@ import           Data.Aeson                            (decode, encode)
 import           Data.ByteString                       (ByteString)
 import qualified Data.ByteString.Lazy                  as BL (fromStrict,
                                                               toStrict)
-import           Data.Conduit                          (Source, yield,
-                                                        awaitForever, ($$))
+import           Data.Conduit                          (Source, awaitForever,
+                                                        yield, ($$))
 import           Data.Conduit.Network                  (appSink, appSource,
                                                         clientSettings,
                                                         runGeneralTCPClient)
-import qualified Data.Map                              as M (keys, null,
-                                                             lookup, delete)
 import qualified Data.HashMap.Strict                   as H (lookup, (!))
-import           Data.List.NonEmpty                    (NonEmpty ((:|)))
 import           Data.List                             (nub)
+import           Data.List.NonEmpty                    (NonEmpty ((:|)))
+import qualified Data.Map                              as M (delete, keys,
+                                                             lookup, null)
 import           Data.Maybe                            (fromJust, fromMaybe,
                                                         isJust)
 import           Data.String.Conversions               (cs)
@@ -106,8 +106,6 @@ runIndex cfg = maybeDetach cfg $ run $ do
         , runNodeT startTxs state
         -- Run the ZMQ API server
         , runNodeT runApi state
-        -- TODO: Respond to transaction GetData requests
-        -- , runNodeT (handleGetData $ (`runDBPool` pool) . getTx) state
         ]
     _ <- waitAnyCancel as
     return ()
@@ -224,6 +222,7 @@ broadcastTxs txids = do
 -- concurrent MySQL requests.
 runApi :: ( MonadLoggerIO m
           , MonadBaseControl IO m
+          , MonadMask m
           )
        => NodeT m ()
 runApi = liftBaseOpDiscard withContext $ \ctx -> do
@@ -294,8 +293,10 @@ runZapAuth ctx k = do
 
 dispatchRequest :: ( MonadLoggerIO m
                    , MonadBaseControl IO m
+                   , MonadMask m
                    )
                 => IndexRequest -> NodeT m IndexResponse
 dispatchRequest req = case req of
     GetNodeStatusR -> getNodeStatusR
+    GetAddressTxsR addrs -> getAddressTxsR addrs
 

@@ -1,9 +1,10 @@
 module Network.Haskoin.Index.Server.Handlers where
 
-import           Control.Concurrent.STM           (STM, isEmptyTMVar, readTVar)
 import           Control.Concurrent.RLock         (state)
+import           Control.Concurrent.STM           (STM, isEmptyTMVar, readTVar)
 import           Control.Concurrent.STM.TBMChan   (isEmptyTBMChan)
 import           Control.Monad                    (mzero)
+import           Control.Monad.Catch              (MonadMask)
 import           Control.Monad.Logger             (MonadLoggerIO, logInfo)
 import           Control.Monad.Reader             (ask)
 import           Control.Monad.Trans              (MonadIO, lift, liftIO)
@@ -18,13 +19,14 @@ import           Data.Aeson.Types                 (Options (..),
                                                    defaultTaggedObject)
 import qualified Data.ByteString.Char8            as C (unpack)
 import           Data.Char                        (toLower)
-import qualified Data.Map.Strict                  as M (Map, keys, assocs)
-import           Data.Time.Clock                  (UTCTime)
+import           Data.List                        (nub, sortBy)
+import qualified Data.Map.Strict                  as M (Map, assocs, keys)
 import           Data.Text                        (Text, pack)
+import           Data.Time.Clock                  (UTCTime)
 import           Data.Unique                      (hashUnique)
 import           Data.Word                        (Word32)
-import           Data.List                        (sortBy)
 import           Network.Haskoin.Block
+import           Network.Haskoin.Crypto
 import           Network.Haskoin.Index.BlockChain
 import           Network.Haskoin.Index.HeaderTree
 import           Network.Haskoin.Index.Peer
@@ -104,6 +106,7 @@ $(deriveJSON (dropFieldLabel 10) ''NodeStatus)
 
 data IndexRequest
     = GetNodeStatusR
+    | GetAddressTxsR ![Address]
 
 $(deriveJSON
     defaultOptions
@@ -142,6 +145,7 @@ instance FromJSON IndexError where
 
 data IndexResponse
     = ResponseNodeStatus !NodeStatus
+    | ResponseAddressTxs ![TxHash]
     | ResponseError !IndexError
 
 $(deriveJSON
@@ -210,6 +214,14 @@ peerStatus (pid, PeerSession{..}) = do
         peerStatusHaveMessage <- not <$> isEmptyTBMChan peerSessionChan
         peerStatusPingNonces  <- readTVar peerSessionPings
         return PeerStatus{..}
+
+getAddressTxsR :: (MonadLoggerIO m, MonadBaseControl IO m, MonadMask m)
+               => [Address] -> NodeT m IndexResponse
+getAddressTxsR addrs = do
+    $(logInfo) $ format $ unwords
+        [ "GetAddressTxsR with", show (length addrs), "addresses" ]
+    txids <- (nub . concat) <$> mapM getAddressTxs addrs
+    return $ ResponseAddressTxs txids
 
 {- Helpers -}
 

@@ -8,6 +8,7 @@ import           Control.Concurrent.STM.TBMChan   (readTBMChan)
 import           Control.Exception.Lifted         (throw)
 import           Control.Monad                    (forM, forM_, forever, unless,
                                                    when, (<=<))
+import           Control.Monad.Catch              (MonadMask)
 import           Control.Monad.Logger             (MonadLoggerIO, logDebug,
                                                    logError, logInfo, logWarn)
 import           Control.Monad.Reader             (asks)
@@ -19,10 +20,9 @@ import           Data.Conduit                     (Source, await, yield, ($$))
 import           Data.Default                     (def)
 import           Data.Either                      (rights)
 import           Data.List                        (delete, nub, sortBy)
-import qualified Data.Map                         as M (delete, fromList,
+import qualified Data.Map                         as M (delete, elems, fromList,
                                                         insert, keys, lookup,
-                                                        notMember, null,
-                                                        toList, elems)
+                                                        notMember, null, toList)
 import           Data.Maybe                       (isNothing, listToMaybe)
 import           Data.String.Conversions          (cs)
 import           Data.Text                        (pack)
@@ -32,7 +32,10 @@ import           Data.Word                        (Word32)
 import qualified Database.LevelDB.Base            as L (BatchOp (Put), DB,
                                                         WriteBatch, get, put,
                                                         write)
+import           Database.LevelDB.Iterator        (iterEntry, iterNext,
+                                                   iterSeek, withIter)
 import           Network.Haskoin.Block
+import           Network.Haskoin.Crypto
 import           Network.Haskoin.Index.HeaderTree
 import           Network.Haskoin.Index.Peer
 import           Network.Haskoin.Index.STM
@@ -547,6 +550,30 @@ txBatch tx@(Tx _ txIns txOuts _) =
     txAddrs = rights $ map fIn txIns ++ map fOut txOuts
     fIn  = inputAddress <=< (decodeInputBS . scriptInput)
     fOut = outputAddress <=< (decodeOutputBS . scriptOutput)
+
+getAddressTxs :: (MonadLoggerIO m, MonadBaseControl IO m, MonadMask m)
+              => Address -> NodeT m [TxHash]
+getAddressTxs addr = do
+    db <- asks sharedLevelDB
+    $(logDebug) $ pack $ unwords
+        [ "Fetching indexed transactions for address"
+        , cs $ addrToBase58 addr
+        ]
+    withDBLock $ withIter db def $ \iter -> do
+        iterSeek iter addrPref
+        go iter []
+  where
+    addrPref = BS.take 16 $ encode' addr
+    go iter acc = iterEntry iter >>= \entM -> case entM of
+        Just (key, valTxid) -> do
+            let (keyAddr, keyTxid) = BS.splitAt 16 key
+            if keyAddr == addrPref
+               then do
+                    let txid = decode' $ keyTxid `BS.append` valTxid
+                    iterNext iter
+                    go iter (txid:acc)
+               else return acc
+        _ -> return acc
 
 bestIndexedBlock :: (MonadBaseControl IO m, MonadIO m) => NodeT m NodeBlock
 bestIndexedBlock = withDBLock $ do

@@ -2,6 +2,7 @@ module Network.Haskoin.Index.Client.Commands
 ( cmdStart
 , cmdStop
 , cmdStatus
+, cmdAddressTxs
 , cmdVersion
 )
 where
@@ -26,6 +27,7 @@ import           Network.Haskoin.Index.Server.Handlers
 import           Network.Haskoin.Index.Settings
 import           Network.Haskoin.Index.STM
 import           Network.Haskoin.Transaction
+import           Network.Haskoin.Crypto
 import           System.Posix.Daemon                   (killAndWait)
 import           System.ZMQ4                           (KeyFormat (..),
                                                         Req (..), Socket,
@@ -53,7 +55,20 @@ cmdStop = R.ask >>= \cfg -> liftIO $ do
     putStrLn "Indexer stopped"
 
 cmdStatus :: Handler ()
-cmdStatus = handleResponse =<< sendZmq GetNodeStatusR
+cmdStatus =
+    sendZmq GetNodeStatusR >>= go . parseResponse
+  where
+    go (ResponseNodeStatus ns) = formatOutput ns (unlines . printNodeStatus)
+    go _ = error "Invalid Status response received"
+
+cmdAddressTxs :: String -> Handler ()
+cmdAddressTxs addrStr =
+    sendZmq (GetAddressTxsR [addr]) >>= go . parseResponse
+  where
+    addr = fromMaybe (error "Invalid address") $ base58ToAddr $ cs addrStr
+    go (ResponseAddressTxs txids) = formatOutput txids $
+        unlines . map (cs . txHashToHex)
+    go _ = error "Invalid AddressTxs response received"
 
 cmdVersion :: Handler ()
 cmdVersion = liftIO $ do
@@ -62,15 +77,13 @@ cmdVersion = liftIO $ do
 
 {- Helpers -}
 
-handleResponse
-    :: Either String IndexResponse
-    -> Handler ()
-handleResponse resE = case resE of
+parseResponse :: Either String IndexResponse -> IndexResponse
+parseResponse resE = case resE of
     Right res -> case res of
-        ResponseNodeStatus ns -> formatOutput ns (unlines . printNodeStatus)
         ResponseError err -> error $ case err of
             IndexInvalidRequest -> "Invalid JSON request"
             IndexServerError m -> unwords [ "Server error:", m ]
+        _ -> res
     Left err -> error err
 
 formatOutput :: (ToJSON a, FromJSON a) => a -> (a -> String) -> Handler ()

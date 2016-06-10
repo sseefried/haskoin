@@ -118,12 +118,13 @@ getConfig fs = do
 
 dispatchCommand :: Config -> [String] -> IO ()
 dispatchCommand cfg args = flip R.runReaderT cfg $ case args of
-    "start"                               : [] -> cmdStart
-    "stop"                                : [] -> cmdStop
-    "status"                              : [] -> cmdStatus
-    "version"                             : [] -> cmdVersion
-    "help"        : [] -> liftIO $ forM_ usage (hPutStrLn stderr)
-    []                 -> liftIO $ forM_ usage (hPutStrLn stderr)
+    "start"    : []        -> cmdStart
+    "stop"     : []        -> cmdStop
+    "status"   : []        -> cmdStatus
+    "addrtxs"  : addr : [] -> cmdAddressTxs addr
+    "version"  : []        -> cmdVersion
+    "help"     : []        -> liftIO $ forM_ usage (hPutStrLn stderr)
+    []                     -> liftIO $ forM_ usage (hPutStrLn stderr)
     _ -> liftIO $
         forM_ ("Invalid command" : usage) (hPutStrLn stderr) >> exitFailure
 
