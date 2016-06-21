@@ -15,13 +15,7 @@ import           Control.Monad.Reader             (asks)
 import           Control.Monad.Trans              (MonadIO, lift, liftIO)
 import           Control.Monad.Trans.Control      (MonadBaseControl,
                                                    liftBaseOp_)
-import           Data.Binary.Get                  (getByteString, getWord16le,
-                                                   getWord32le, getWord8,
-                                                   isEmpty, runGet)
-import qualified Data.ByteString                  as BS (ByteString, append,
-                                                         drop, head, length,
-                                                         splitAt, take, null)
-import           Data.ByteString.Lazy             (fromStrict)
+import qualified Data.ByteString                  as BS (append, splitAt, take)
 import           Data.Conduit                     (Source, await, yield, ($$))
 import           Data.Default                     (def)
 import           Data.Either                      (rights)
@@ -29,8 +23,7 @@ import           Data.List                        (delete, nub, sortBy)
 import qualified Data.Map                         as M (delete, elems, fromList,
                                                         insert, keys, lookup,
                                                         notMember, null, toList)
-import           Data.Maybe                       (isNothing, listToMaybe,
-                                                   mapMaybe)
+import           Data.Maybe                       (isNothing, listToMaybe)
 import           Data.String.Conversions          (cs)
 import           Data.Text                        (pack)
 import           Data.Time.Clock                  (diffUTCTime, getCurrentTime)
@@ -531,7 +524,7 @@ indexBlock b@(Block _ txs) = do
         , cs $ blockHashToHex $ headerHash $ blockHeader b
         , "containing", show (length txs), "txs"
         ]
-    let batch = concat $! map txBatch txs
+    let batch = concat $ map txBatch txs
     withDBLock $ L.write db def batch
     return $ length batch
 
@@ -547,50 +540,16 @@ indexTx tx = do
     return $ length batch
 
 txBatch :: Tx -> L.WriteBatch
-txBatch tx =
-    map (\a -> L.Put (key a) val) txAddrs
+txBatch tx@(Tx _ txIns txOuts _) =
+    batch
   where
-    txid = txHash tx
+    batch = map (\a -> L.Put (key a) val) txAddrs
     (l, val) = BS.splitAt 16 $ encode' txid
-    key a = a `BS.append` l
-    txAddrs = mapMaybe fIn (txIn tx) ++ mapMaybe fOut (txOut tx)
-    fIn  = extractInputAddress . scriptInput
-    fOut = extractOutputAddress . scriptOutput
-
-extractInputAddress :: BS.ByteString -> Maybe BS.ByteString
-extractInputAddress =
-    extractAddr <=< dropSig
-  where
-    dropSig = dropDat <=< dropPushData
-    dropDat (len, dat) = case BS.length len of
-        1 -> Just $ BS.drop
-            (fromIntegral $ runGet getWord8 $ fromStrict len) dat
-        2 -> Just $ BS.drop
-            (fromIntegral $ runGet getWord16le $ fromStrict len) dat
-        4 -> Just $ BS.drop
-            (fromIntegral $ runGet getWord32le $ fromStrict len) dat
-        _ -> Nothing
-    extractAddr = (fmap $ BS.take 16 . snd) . dropPushData
-
-extractOutputAddress :: BS.ByteString -> Maybe BS.ByteString
-extractOutputAddress bs
-    | BS.null bs = Nothing
-    | otherwise = extractAddr =<< case BS.head bs of
-        0x76 -> Just $ BS.drop 2 bs -- OP_DUP -> OP_PUSH160 -> Addr
-        0xa9 -> Just $ BS.drop 1 bs -- OP_HASH160 -> Addr
-        _    -> Nothing
-  where
-    extractAddr = (fmap $ BS.take 16 . snd) . dropPushData
-
-dropPushData :: BS.ByteString -> Maybe (BS.ByteString, BS.ByteString)
-dropPushData bs
-    | BS.null bs = Nothing
-    | BS.head bs <= 0x4b = Just $ BS.splitAt 1 bs
-    | otherwise = case BS.head bs of
-        0x4c -> Just $ BS.splitAt 1 $ BS.drop 1 bs
-        0x4d -> Just $ BS.splitAt 2 $ BS.drop 1 bs
-        0x4e -> Just $ BS.splitAt 4 $ BS.drop 1 bs
-        _ -> Nothing
+    key a = (BS.take 16 (encode' a)) `BS.append` l
+    txid = txHash tx
+    txAddrs = rights $ map fIn txIns ++ map fOut txOuts
+    fIn  = inputAddress <=< (decodeInputBS . scriptInput)
+    fOut = outputAddress <=< (decodeOutputBS . scriptOutput)
 
 getAddressTxs :: (MonadLoggerIO m, MonadBaseControl IO m, MonadMask m)
               => Address -> NodeT m [TxHash]
