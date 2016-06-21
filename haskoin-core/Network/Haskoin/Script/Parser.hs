@@ -209,6 +209,7 @@ outputAddress :: ScriptOutput -> Either String Address
 outputAddress s = case s of
     PayPKHash a -> return a
     PayScriptHash a -> return a
+    PayPK k -> return $ pubKeyAddr k
     _ -> Left "outputAddress: bad output script type"
 
 -- | Get the address of a `ScriptInput`
