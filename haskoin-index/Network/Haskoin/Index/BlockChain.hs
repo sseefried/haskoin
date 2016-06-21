@@ -15,8 +15,7 @@ import           Control.Monad.Reader             (asks)
 import           Control.Monad.Trans              (MonadIO, lift, liftIO)
 import           Control.Monad.Trans.Control      (MonadBaseControl,
                                                    liftBaseOp_)
-import qualified Data.ByteString                  as BS (append, splitAt, tail,
-                                                         take)
+import qualified Data.ByteString                  as BS (append, splitAt, tail)
 import           Data.Conduit                     (Source, await, yield, ($$))
 import           Data.Default                     (def)
 import           Data.Either                      (rights)
@@ -545,7 +544,7 @@ txBatch tx =
     map (\a -> L.Put (key a) val) txAddrs
   where
     (l, val) = BS.splitAt 16 $ encode' txid
-    key a = (BS.take 16 (encode' a)) `BS.append` l
+    key a = encode' a `BS.append` l
     txid = txHash tx
     txAddrs = rights addrs
     addrs = map fIn (txIn tx) ++ map fOut (txOut tx)
@@ -564,7 +563,7 @@ getAddressTxs addr = do
         iterSeek iter addrPref
         go iter []
   where
-    addrPref = BS.take 16 $ encode' addr
+    addrPref = encode' addr
     go iter acc = iterEntry iter >>= \entM -> case entM of
         Just (key, valTxid) -> do
             let (keyAddr, keyTxid) = BS.splitAt 16 key
