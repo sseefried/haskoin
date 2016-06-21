@@ -150,8 +150,10 @@ columns: 80
 #
 # No language extensions are enabled by default.
 language_extensions:
+  - TemplateHaskell
   - DeriveDataTypeable
   - FlexibleContexts
   - FlexibleInstances
+  - MultiParamTypeClasses
   - OverloadedStrings
   - RecordWildCards

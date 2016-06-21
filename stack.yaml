@@ -2,7 +2,7 @@ flags: {}
 packages:
 - haskoin-core
 - haskoin-index
-- haskoin-wallet
+# - haskoin-wallet
 extra-deps:
 - concurrent-extra-0.7.0.10
 - daemons-0.2.1
