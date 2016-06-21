@@ -52,7 +52,6 @@ tests =
         , testProperty "TxOut" $ \(ArbitraryTxOut x) -> metaBinary x
         , testProperty "OutPoint" $ \(ArbitraryOutPoint x) -> metaBinary x
         , testProperty "Tx" $ \(ArbitraryTx x) -> metaBinary x
-        , testProperty "CoinbaseTx" $ \(ArbitraryCoinbaseTx x) -> metaBinary x
         ]
     , testGroup "Binary encoding and decoding of block types"
         [ testProperty "Block" $ \(ArbitraryBlock x) -> metaBinary x

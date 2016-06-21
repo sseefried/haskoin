@@ -110,8 +110,8 @@ headerHash = BlockHash . doubleHash256 . encode'
 -- | Data type recording information on a 'Block'. The hash of a block is
 -- defined as the hash of this data structure. The block mining process
 -- involves finding a partial hash collision by varying the nonce in the
--- 'BlockHeader' and/or additional randomness in the 'CoinbaseTx' of this
--- 'Block'. Variations in the 'CoinbaseTx' will result in different merkle
+-- 'BlockHeader' and/or additional randomness in the coinbase tx of this
+-- 'Block'. Variations in the coinbase tx will result in different merkle
 -- roots in the 'BlockHeader'.
 data BlockHeader =
     BlockHeader {

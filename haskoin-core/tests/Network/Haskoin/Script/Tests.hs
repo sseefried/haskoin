@@ -340,39 +340,32 @@ nullOutPoint =
 -- input (and correct prevout hash), using the given scriptSig. All
 -- nLockTimes are 0, all nSequences are max."
 buildCreditTx :: ByteString -> Tx
-buildCreditTx scriptPubKey = Tx {
-                 txVersion    = 1
-               , txIn         = [ txI ]
-               , txOut        = [ txO ]
-               , txLockTime   = 0
+buildCreditTx scriptPubKey =
+    createTx 1 [ txI ] [ txO ] 0
+  where
+    txO = TxOut { outValue = 0
+                , scriptOutput = scriptPubKey
+                }
+    txI = TxIn { prevOutput = nullOutPoint
+               , scriptInput = encode' $ Script [ OP_0, OP_0 ]
+               , txInSequence = maxSeqNum
                }
-    where txO = TxOut {
-                       outValue = 0
-                     , scriptOutput = scriptPubKey
-                     }
-          txI = TxIn {
-                        prevOutput = nullOutPoint
-                      , scriptInput = encode' $ Script [ OP_0, OP_0 ]
-                      , txInSequence = maxSeqNum
-                      }
 
 -- | Build a spending transaction for the tests.  Takes as input the
 -- crediting transaction
 buildSpendTx :: ByteString  -- ScriptSig
-             -> Tx     -- Creditting Tx
+             -> Tx          -- Creditting Tx
              -> Tx
-buildSpendTx scriptSig creditTx = Tx {
-         txVersion  = 1
-       , txIn       = [ txI ]
-       , txOut      = [ txO ]
-       , txLockTime = 0
-       }
-    where txI = TxIn {
-               prevOutput   = OutPoint { outPointHash = txHash creditTx , outPointIndex = 0 }
-             , scriptInput  = scriptSig
-             , txInSequence = maxSeqNum
-             }
-          txO = TxOut { outValue = 0, scriptOutput = BS.empty }
+buildSpendTx scriptSig creditTx =
+    createTx 1 [ txI ] [ txO ] 0
+  where
+    txI = TxIn { prevOutput = OutPoint { outPointHash = txHash creditTx
+                                       , outPointIndex = 0
+                                       }
+               , scriptInput  = scriptSig
+               , txInSequence = maxSeqNum
+               }
+    txO = TxOut { outValue = 0, scriptOutput = BS.empty }
 
 -- | Executes the test of a scriptSig, pubKeyScript pair, including
 -- building the required transactions and verifying the spending

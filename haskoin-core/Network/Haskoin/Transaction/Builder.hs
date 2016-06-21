@@ -226,7 +226,7 @@ buildAddrTx xs ys =
 -- and a list of 'ScriptOutput' and amounts as outputs.
 buildTx :: [OutPoint] -> [(ScriptOutput, Word64)] -> Either String Tx
 buildTx xs ys =
-    mapM fo ys >>= \os -> return $ Tx 1 (map fi xs) os 0
+    mapM fo ys >>= \os -> return $ createTx 1 (map fi xs) os 0
   where
     fi outPoint = TxIn outPoint BS.empty maxBound
     fo (o, v)
@@ -271,10 +271,11 @@ signTx :: Tx               -- ^ Transaction to sign
           -> [SigInput]       -- ^ SigInput signing parameters
           -> [PrvKey]         -- ^ List of private keys to use for signing
           -> Either String Tx -- ^ Signed transaction
-signTx otx@(Tx _ ti _ _) sigis allKeys
+signTx otx sigis allKeys
     | null ti   = Left "signTx: Transaction has no inputs"
     | otherwise = foldM go otx $ findSigInput sigis ti
   where
+    ti = txIn otx
     go tx (sigi@(SigInput so _ _ rdmM), i) = do
         keys <- sigKeys so rdmM allKeys
         foldM (\t k -> signInput t i sigi k) tx keys
