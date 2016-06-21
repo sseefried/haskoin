@@ -15,7 +15,8 @@ import           Control.Monad.Reader             (asks)
 import           Control.Monad.Trans              (MonadIO, lift, liftIO)
 import           Control.Monad.Trans.Control      (MonadBaseControl,
                                                    liftBaseOp_)
-import qualified Data.ByteString                  as BS (append, splitAt, take)
+import qualified Data.ByteString                  as BS (append, splitAt, tail,
+                                                         take)
 import           Data.Conduit                     (Source, await, yield, ($$))
 import           Data.Default                     (def)
 import           Data.Either                      (rights)
@@ -540,14 +541,14 @@ indexTx tx = do
     return $ length batch
 
 txBatch :: Tx -> L.WriteBatch
-txBatch tx@(Tx _ txIns txOuts _) =
-    batch
+txBatch tx =
+    (map (\a -> L.Put (key a) val) txAddrs, addrs)
   where
-    batch = map (\a -> L.Put (key a) val) txAddrs
     (l, val) = BS.splitAt 16 $ encode' txid
     key a = (BS.take 16 (encode' a)) `BS.append` l
     txid = txHash tx
-    txAddrs = rights $ map fIn txIns ++ map fOut txOuts
+    txAddrs = rights addrs
+    addrs = map fIn (txIn tx) ++ map fOut (txOut tx)
     fIn  = inputAddress <=< (decodeInputBS . scriptInput)
     fOut = outputAddress <=< (decodeOutputBS . scriptOutput)
 
