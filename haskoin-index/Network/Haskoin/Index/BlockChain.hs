@@ -542,7 +542,7 @@ indexTx tx = do
 
 txBatch :: Tx -> L.WriteBatch
 txBatch tx =
-    (map (\a -> L.Put (key a) val) txAddrs, addrs)
+    map (\a -> L.Put (key a) val) txAddrs
   where
     (l, val) = BS.splitAt 16 $ encode' txid
     key a = (BS.take 16 (encode' a)) `BS.append` l
