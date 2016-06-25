@@ -23,7 +23,8 @@ import           Data.List                        (delete, nub, sortBy)
 import qualified Data.Map                         as M (delete, elems, fromList,
                                                         insert, keys, lookup,
                                                         notMember, null, toList)
-import           Data.Maybe                       (isNothing, listToMaybe)
+import           Data.Maybe                       (fromMaybe, isNothing,
+                                                   listToMaybe)
 import           Data.Serialize                   (decode, encode)
 import           Data.String.Conversions          (cs)
 import           Data.Text                        (pack)
@@ -58,7 +59,9 @@ blockSync = do
           bh <- do
               -- Take the best block in the window, or look in the database
               bhM <- atomicallyNodeT bestBlockInWindow
-              maybe bestIndexedBlock return bhM
+              let err = error "Invalid bestIndexedBlock in blockSync"
+                  f   = runSqlNodeT . getBlockByHash =<< bestIndexedBlock
+              maybe (fmap (fromMaybe err) f) return bhM
           -- Wait either for a new block to arrive
           $(logDebug) "Waiting for a new block..."
           _ <- atomicallyNodeT $ waitNewBlock $ nodeHash bh
@@ -145,7 +148,7 @@ blockDownload action = do
                     nodeM <- runSqlNodeT $ getBlockByHash bh
                     case nodeM of
                         Just node -> do
-                            setBestIndexedBlock node
+                            setBestIndexedBlock $ nodeHash node
                             $(logInfo) $ formatPid pid peerSessionHost $
                                 unwords [ "Updating best indexed block to"
                                         , cs $ blockHashToHex bh
@@ -288,7 +291,7 @@ areBlocksSynced :: (MonadIO m, MonadBaseControl IO m)
 areBlocksSynced = withDBLock $ do
     (headersSynced, bestHead) <- areHeadersSynced
     bestBlock <- bestIndexedBlock
-    return ( headersSynced && nodeHash bestBlock == nodeHash bestHead
+    return ( headersSynced && bestBlock == nodeHash bestHead
            , bestHead
            )
 
@@ -515,7 +518,7 @@ initLevelDB :: (MonadBaseControl IO m, MonadIO m) => NodeT m ()
 initLevelDB = withDBLock $ do
     db <- asks sharedLevelDB
     resM <- liftIO $ L.get db def "0-bestindexedblock"
-    when (isNothing resM) $ setBestIndexedBlock genesisBlock
+    when (isNothing resM) $ setBestIndexedBlock $ nodeHash genesisBlock
 
 indexBlock :: (MonadLoggerIO m, MonadBaseControl IO m) => Block -> NodeT m Int
 indexBlock b@(Block _ txs) = do
@@ -578,7 +581,7 @@ getAddressTxs addr = do
                else return acc
         _ -> return acc
 
-bestIndexedBlock :: (MonadBaseControl IO m, MonadIO m) => NodeT m NodeBlock
+bestIndexedBlock :: (MonadBaseControl IO m, MonadIO m) => NodeT m BlockHash
 bestIndexedBlock = withDBLock $ do
     db <- asks sharedLevelDB
     -- Start the key with 0 as it is smaller than all base58 characters
@@ -590,7 +593,7 @@ bestIndexedBlock = withDBLock $ do
     err = error "Could not decode bestIndexedBlock"
 
 setBestIndexedBlock :: (MonadBaseControl IO m, MonadIO m)
-                    => NodeBlock -> NodeT m ()
+                    => BlockHash -> NodeT m ()
 setBestIndexedBlock node = withDBLock $ do
     db <- asks sharedLevelDB
     L.put db def "0-bestindexedblock" $ encode node

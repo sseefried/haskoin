@@ -21,6 +21,7 @@ import qualified Data.ByteString.Char8            as C (unpack)
 import           Data.Char                        (toLower)
 import           Data.List                        (nub, sortBy)
 import qualified Data.Map.Strict                  as M (Map, assocs, keys)
+import           Data.Maybe                       (fromMaybe)
 import           Data.Text                        (Text, pack)
 import           Data.Time.Clock                  (UTCTime)
 import           Data.Unique                      (hashUnique)
@@ -171,7 +172,9 @@ getNodeStatusR = do
 nodeStatus :: (MonadIO m, MonadBaseControl IO m) => NodeT m NodeStatus
 nodeStatus = do
     SharedNodeState{..} <- ask
-    best   <- bestIndexedBlock
+    bestH <- bestIndexedBlock
+    let err = error "Could not find bestIndexedBlock in nodeStatus"
+    best <- fmap (fromMaybe err) $ runSqlNodeT $ getBlockByHash bestH
     header <- runSqlNodeT getBestBlock
     syncLock <- liftIO $ state sharedSyncLock
     levelLock <- liftIO $ state sharedDBLock
