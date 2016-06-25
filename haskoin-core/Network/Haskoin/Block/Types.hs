@@ -23,9 +23,9 @@ import Data.Bits ((.&.), (.|.), shiftR, shiftL)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS (length, reverse)
 import Data.Word (Word32)
-import Data.Binary (Binary, get, put)
-import Data.Binary.Get (getWord32le)
-import Data.Binary.Put (Put, putWord32le)
+import Data.Serialize (Serialize, encode, get, put)
+import Data.Serialize.Get (getWord32le)
+import Data.Serialize.Put (Put, putWord32le)
 import Data.String (IsString, fromString)
 import Data.String.Conversions (cs)
 import Text.Read (readPrec, parens, lexP, pfail)
@@ -50,7 +50,7 @@ data Block =
 instance NFData Block where
     rnf (Block h ts) = rnf h `seq` rnf ts
 
-instance Binary Block where
+instance Serialize Block where
 
     get = do
         header     <- get
@@ -83,7 +83,7 @@ instance IsString BlockHash where
     fromString = fromMaybe e . hexToBlockHash . cs where
         e = error "Could not read block hash from hex string"
 
-instance Binary BlockHash where
+instance Serialize BlockHash where
     get = BlockHash <$> get
     put = put . getBlockHash
 
@@ -105,7 +105,7 @@ hexToBlockHash hex = do
 
 -- | Compute the hash of a block header
 headerHash :: BlockHeader -> BlockHash
-headerHash = BlockHash . doubleHash256 . encode'
+headerHash = BlockHash . doubleHash256 . encode
 
 -- | Data type recording information on a 'Block'. The hash of a block is
 -- defined as the hash of this data structure. The block mining process
@@ -138,7 +138,7 @@ instance NFData BlockHeader where
     rnf (BlockHeader v p m t b n) =
         rnf v `seq` rnf p `seq` rnf m `seq` rnf t `seq` rnf b `seq` rnf n
 
-instance Binary BlockHeader where
+instance Serialize BlockHeader where
 
     get = BlockHeader <$> getWord32le
                       <*> get
@@ -181,7 +181,7 @@ data GetBlocks =
 instance NFData GetBlocks where
     rnf (GetBlocks v l h) = rnf v `seq` rnf l `seq` rnf h
 
-instance Binary GetBlocks where
+instance Serialize GetBlocks where
 
     get = GetBlocks <$> getWord32le
                     <*> (repList =<< get)
@@ -219,7 +219,7 @@ data GetHeaders =
 instance NFData GetHeaders where
     rnf (GetHeaders v l h) = rnf v `seq` rnf l `seq` rnf h
 
-instance Binary GetHeaders where
+instance Serialize GetHeaders where
 
     get = GetHeaders <$> getWord32le
                      <*> (repList =<< get)
@@ -244,7 +244,7 @@ data Headers =
 instance NFData Headers where
     rnf (Headers l) = rnf l
 
-instance Binary Headers where
+instance Serialize Headers where
 
     get = Headers <$> (repList =<< get)
       where

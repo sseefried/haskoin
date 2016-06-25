@@ -1,6 +1,6 @@
 module Network.Haskoin.Index.HeaderTree.Model where
 
-import           Data.Binary                            (Binary, get, put)
+import           Data.Serialize                         (Serialize, get, put)
 import           Data.Word                              (Word32)
 import           Database.Persist.TH                    (mkMigrate, mkPersist,
                                                          persistLowerCase,
@@ -20,7 +20,7 @@ NodeBlock
     deriving     Eq
 |]
 
-instance Binary NodeBlock where
+instance Serialize NodeBlock where
     put (NodeBlock sh (NodeHeader bh) w h c) =
         put sh >> put bh >> put w >> put h >> put c
     get = NodeBlock <$> get <*> (NodeHeader <$> get) <*> get <*> get <*> get

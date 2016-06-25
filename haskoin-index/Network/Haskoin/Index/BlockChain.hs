@@ -24,6 +24,7 @@ import qualified Data.Map                         as M (delete, elems, fromList,
                                                         insert, keys, lookup,
                                                         notMember, null, toList)
 import           Data.Maybe                       (isNothing, listToMaybe)
+import           Data.Serialize                   (decode, encode)
 import           Data.String.Conversions          (cs)
 import           Data.Text                        (pack)
 import           Data.Time.Clock                  (diffUTCTime, getCurrentTime)
@@ -543,8 +544,8 @@ txBatch :: Tx -> L.WriteBatch
 txBatch tx =
     map (\a -> L.Put (key a) val) txAddrs
   where
-    (l, val) = BS.splitAt 16 $ encode' txid
-    key a = encode' a `BS.append` l
+    (l, val) = BS.splitAt 16 $ encode txid
+    key a = encode a `BS.append` l
     txid = txHash tx
     txAddrs = rights addrs
     addrs = map fIn (txIn tx) ++ map fOut (txOut tx)
@@ -563,13 +564,15 @@ getAddressTxs addr = do
         iterSeek iter addrPref
         go iter []
   where
-    addrPref = encode' addr
+    addrPref = encode addr
     go iter acc = iterEntry iter >>= \entM -> case entM of
         Just (key, valTxid) -> do
             let (keyAddr, keyTxid) = BS.splitAt 16 key
             if keyAddr == addrPref
                then do
-                    let txid = decode' $ keyTxid `BS.append` valTxid
+                    let err = error "Could not decode getAddressTxs"
+                        txid = either (const err) id $
+                            decode $ keyTxid `BS.append` valTxid
                     iterNext iter
                     go iter (txid:acc)
                else return acc
@@ -581,12 +584,14 @@ bestIndexedBlock = withDBLock $ do
     -- Start the key with 0 as it is smaller than all base58 characters
     resM <- liftIO $ L.get db def "0-bestindexedblock"
     case resM of
-        Just bs -> return $ decode' bs
+        Just bs -> return $ either (const err) id $ decode bs
         _ -> error "No best indexed block in the database"
+  where
+    err = error "Could not decode bestIndexedBlock"
 
 setBestIndexedBlock :: (MonadBaseControl IO m, MonadIO m)
                     => NodeBlock -> NodeT m ()
 setBestIndexedBlock node = withDBLock $ do
     db <- asks sharedLevelDB
-    L.put db def "0-bestindexedblock" $ encode' node
+    L.put db def "0-bestindexedblock" $ encode node
 

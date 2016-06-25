@@ -20,15 +20,15 @@ import Control.Monad (liftM2, replicateM, forM_, unless, mzero, (<=<))
 
 import Data.Aeson (Value(String), FromJSON, ToJSON, parseJSON, toJSON, withText)
 import Data.Word (Word32, Word64)
-import Data.Binary (Binary, get, put)
-import Data.Binary.Get
+import Data.Serialize (Serialize, get, put, encode)
+import Data.Serialize.Get
     ( getWord32le
     , getWord64le
     , getByteString
-    , bytesRead
+    , remaining
     , lookAhead
     )
-import Data.Binary.Put
+import Data.Serialize.Put
     ( putWord32le
     , putWord64le
     , putByteString
@@ -72,13 +72,13 @@ instance IsString TxHash where
         e = error "Could not read transaction hash from decoded hex string"
         e' = error "Colud not decode hex string with transaction hash"
 
-instance Binary TxHash where
+instance Serialize TxHash where
     get = TxHash <$> get
     put = put . getTxHash
 
 nosigTxHash :: Tx -> TxHash
 nosigTxHash tx =
-    TxHash $ doubleHash256 $ encode' tx{ txIn = map clearInput $ txIn tx }
+    TxHash $ doubleHash256 $ encode tx{ txIn = map clearInput $ txIn tx }
   where
     clearInput ti = ti{ scriptInput = BS.empty }
 
@@ -118,7 +118,7 @@ createTx v is os l =
        , txIn       = is
        , txOut      = os
        , txLockTime = l
-       , txHash     = TxHash $ doubleHash256 $ encode' tx
+       , txHash     = TxHash $ doubleHash256 $ encode tx
        }
   where
     tx = Tx { txVersion  = v
@@ -130,7 +130,7 @@ createTx v is os l =
 
 instance Show Tx where
     showsPrec d tx = showParen (d > 10) $
-        showString "Tx " . shows (encodeHex $ encode' tx)
+        showString "Tx " . shows (encodeHex $ encode tx)
 
 instance Read Tx where
     readPrec = parens $ do
@@ -147,17 +147,17 @@ instance IsString Tx where
 instance NFData Tx where
     rnf (Tx v i o l t) = rnf v `seq` rnf i `seq` rnf o `seq` rnf l `seq` rnf t
 
-instance Binary Tx where
+instance Serialize Tx where
     get = do
-        start <- bytesRead
+        start <- remaining
         (v, is, os, l, end) <- lookAhead $ do
             v  <- getWord32le
             is <- replicateList =<< get
             os <- replicateList =<< get
             l  <- getWord32le
-            end <- bytesRead
+            end <- remaining
             return (v, is, os, l, end)
-        bs <- getByteString $ fromIntegral $ end - start
+        bs <- getByteString $ fromIntegral $ start - end
         return $ Tx { txVersion  = v
                     , txIn       = is
                     , txOut      = os
@@ -180,7 +180,7 @@ instance FromJSON Tx where
         maybe mzero return . (decodeToMaybe <=< decodeHex) . cs
 
 instance ToJSON Tx where
-    toJSON = String . cs . encodeHex . encode'
+    toJSON = String . cs . encodeHex . encode
 
 -- | Data type representing a transaction input.
 data TxIn =
@@ -199,7 +199,7 @@ data TxIn =
 instance NFData TxIn where
     rnf (TxIn p i s) = rnf p `seq` rnf i `seq` rnf s
 
-instance Binary TxIn where
+instance Serialize TxIn where
     get =
         TxIn <$> get <*> (readBS =<< get) <*> getWord32le
       where
@@ -223,7 +223,7 @@ data TxOut =
 instance NFData TxOut where
     rnf (TxOut v o) = rnf v `seq` rnf o
 
-instance Binary TxOut where
+instance Serialize TxOut where
     get = do
         val <- getWord64le
         (VarInt len) <- get
@@ -252,9 +252,9 @@ instance FromJSON OutPoint where
         maybe mzero return . (decodeToMaybe <=< decodeHex) . cs
 
 instance ToJSON OutPoint where
-    toJSON = String . cs . encodeHex . encode'
+    toJSON = String . cs . encodeHex . encode
 
-instance Binary OutPoint where
+instance Serialize OutPoint where
     get = do
         (h,i) <- liftM2 (,) get getWord32le
         return $ OutPoint h i

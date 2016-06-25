@@ -1,5 +1,6 @@
 module Network.Haskoin.Index.HeaderTree.Types where
 
+import           Data.Serialize        (encode)
 import           Data.Word             (Word32, Word64)
 import           Database.Persist      (PersistField (..), PersistValue (..),
                                         SqlType (..))
@@ -18,7 +19,7 @@ newtype NodeHeader = NodeHeader { getNodeHeader :: BlockHeader }
 {- SQL database backend for HeaderTree -}
 
 instance PersistField NodeHeader where
-    toPersistValue = PersistByteString . encode' . getNodeHeader
+    toPersistValue = PersistByteString . encode . getNodeHeader
     fromPersistValue (PersistByteString bs) = maybeToEither
         "Could not decode block header" $ NodeHeader <$> decodeToMaybe bs
     fromPersistValue _ = Left "Invalid persistent block header"

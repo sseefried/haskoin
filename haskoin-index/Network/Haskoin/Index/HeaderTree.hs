@@ -52,6 +52,7 @@ import           Data.Function                          (on)
 import           Data.List                              (find, maximumBy, sort)
 import           Data.Maybe                             (fromMaybe, isNothing,
                                                          listToMaybe, mapMaybe)
+import           Data.Serialize                         (decode, encode)
 import           Data.String.Conversions                (cs)
 import           Data.Word                              (Word32)
 import           Database.Esqueleto                     (Esqueleto, Value, asc,
@@ -96,7 +97,10 @@ isBetterChain a = case a of
 type MinWork = Word32
 
 shortHash :: BlockHash -> ShortHash
-shortHash = decode' . BS.take 8 . getHash256 . getBlockHash
+shortHash =
+    either (const err) id . decode . BS.take 8 . getHash256 . getBlockHash
+  where
+    err = error "Could not decode shortHash"
 
 nodeHeader :: NodeBlock -> BlockHeader
 nodeHeader = getNodeHeader . nodeBlockHeader
@@ -427,7 +431,7 @@ isValidPOW bh
 
 -- | Returns the proof of work of a block header as an Integer number.
 headerPOW :: BlockHeader -> Integer
-headerPOW =  bsToInteger . BS.reverse . encode' . headerHash
+headerPOW =  bsToInteger . BS.reverse . encode . headerHash
 
 -- | Returns the work represented by this block. Work is defined as the number
 -- of tries needed to solve a block in the average case with respect to the
