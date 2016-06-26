@@ -37,6 +37,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
     ( head
     , singleton
+    , length
     )
 import Data.String.Conversions (cs)
 import Data.Aeson
@@ -68,6 +69,7 @@ data ScriptOutput =
                     }
       -- | Pay to a script hash.
     | PayScriptHash { getOutputAddress  :: !Address }
+    | PayOpReturn   { getPayload :: !ByteString }
     deriving (Eq, Show, Read)
 
 instance FromJSON ScriptOutput where
@@ -149,6 +151,12 @@ encodeOutput s = Script $ case s of
                              ]
         (PubKeyAddress _) ->
             error "encodeOutput: PubKeyAddress is invalid in PayScriptHash"
+    (PayOpReturn hex)
+       | BS.length hex <= 160 ->
+           case decodeHex hex of
+             Just bs -> [ OP_RETURN, opPushData bs ]
+             Nothing -> error "encodeOutput: PayOpReturn: could not decode hex"
+       | otherwise         -> error "encodeOutput: PayOpReturn: Payload too big!"
 
 -- | Similar to 'encodeOutput' but encodes to a ByteString
 encodeOutputBS :: ScriptOutput -> ByteString
